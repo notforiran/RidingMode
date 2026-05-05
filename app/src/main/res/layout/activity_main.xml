@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:padding="22dp">
+
+    <TextView
+        android:id="@+id/title_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="42dp"
+        android:text="RIDING ASSISTANT"
+        android:textColor="@color/text_primary"
+        android:textSize="25sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.11" />
+
+    <TextView
+        android:id="@+id/subtitle_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/title_text"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="10dp"
+        android:text="Voice control for calls and music"
+        android:textColor="@color/text_muted"
+        android:textSize="13sp" />
+
+    <View
+        android:id="@+id/pulse_ring"
+        android:layout_width="244dp"
+        android:layout_height="244dp"
+        android:layout_centerInParent="true"
+        android:background="@drawable/bg_pulse_ring"
+        android:alpha="0.0"
+        android:visibility="invisible" />
+
+    <Button
+        android:id="@+id/btn_start_engine"
+        android:layout_width="210dp"
+        android:layout_height="210dp"
+        android:layout_centerInParent="true"
+        android:background="@drawable/bg_start_button"
+        android:text="START\nENGINE"
+        android:textColor="@color/text_primary"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:elevation="16dp"
+        android:stateListAnimator="@null" />
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/btn_start_engine"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="30dp"
+        android:text="ENGINE OFF"
+        android:textColor="@color/text_muted"
+        android:textSize="18sp"
+        android:textAllCaps="true"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/help_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:background="@drawable/bg_panel"
+        android:gravity="center"
+        android:lineSpacingExtra="4dp"
+        android:padding="14dp"
+        android:text="Commands: play music, pause music, next track, previous track, call [name/number], answer, hang up, ride off"
+        android:textColor="@color/text_muted"
+        android:textSize="12sp" />
+</RelativeLayout>

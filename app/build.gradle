@@ -1,0 +1,21 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.ridingmode.app'
+    compileSdk 35
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        applicationId 'com.ridingmode.app'
+        minSdk 26
+        targetSdk 35
+        versionCode 9
+        versionName '1.0.9-v9-audited'
+    }
+}
