@@ -1,19 +1,28 @@
 package com.ridingmode.app;
 
 import android.Manifest;
-import android.animation.ObjectAnimator;
-import android.animation.PropertyValuesHolder;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
+import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -21,40 +30,79 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 7001;
 
-    private Button btnStartEngine;
-    private TextView statusText;
-    private View pulseRing;
+    private ImageView backgroundScreen;
+    private View engineHotspot;
+    private View contactsHotspot;
+    private View commandsHotspot;
+    private View contactsDrawer;
+    private View commandsDrawer;
+    private EditText inputContactName;
+    private EditText inputContactNumber;
+    private LinearLayout contactsListContainer;
+    private TextView commandsText;
     private MediaPlayer mediaPlayer;
-    private ObjectAnimator pulseAnimator;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private String[] requestedPermissions;
     private boolean pendingStartAfterNotificationSettings;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        lockApprovedFullScreenDesign();
         setContentView(R.layout.activity_main);
 
-        if (Build.VERSION.SDK_INT >= 21) {
-            getWindow().setStatusBarColor(0xFF030712);
-            getWindow().setNavigationBarColor(0xFF030712);
-        }
-
-        btnStartEngine = findViewById(R.id.btn_start_engine);
-        statusText = findViewById(R.id.status_text);
-        pulseRing = findViewById(R.id.pulse_ring);
+        backgroundScreen = findViewById(R.id.background_screen);
+        engineHotspot = findViewById(R.id.engine_hotspot);
+        contactsHotspot = findViewById(R.id.contacts_hotspot);
+        commandsHotspot = findViewById(R.id.commands_hotspot);
+        contactsDrawer = findViewById(R.id.contacts_drawer);
+        commandsDrawer = findViewById(R.id.commands_drawer);
+        inputContactName = findViewById(R.id.input_contact_name);
+        inputContactNumber = findViewById(R.id.input_contact_number);
+        contactsListContainer = findViewById(R.id.contacts_list_container);
+        commandsText = findViewById(R.id.commands_text);
         requestedPermissions = buildRequestedPermissions();
 
-        btnStartEngine.setOnClickListener(v -> {
+        commandsText.setText(buildCommandsPreview());
+        inputContactName.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        inputContactNumber.setInputType(InputType.TYPE_CLASS_PHONE);
+
+        engineHotspot.setOnClickListener(v -> {
             if (!RidingForegroundService.isRiding) ensureReadyAndStart();
             else stopRidingMode();
         });
+        commandsHotspot.setOnClickListener(v -> toggleDrawer(commandsDrawer, true));
+        contactsHotspot.setOnClickListener(v -> toggleDrawer(contactsDrawer, false));
+        findViewById(R.id.close_commands).setOnClickListener(v -> hideDrawer(commandsDrawer, true));
+        findViewById(R.id.close_contacts).setOnClickListener(v -> hideDrawer(contactsDrawer, false));
+        findViewById(R.id.btn_add_contact).setOnClickListener(v -> savePriorityContact());
+
         syncUiWithService();
+        refreshContactList();
+    }
+
+    private void lockApprovedFullScreenDesign() {
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (Build.VERSION.SDK_INT >= 21) {
+            getWindow().setStatusBarColor(0xFF000000);
+            getWindow().setNavigationBarColor(0xFF000000);
+        }
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        lockApprovedFullScreenDesign();
         syncUiWithService();
+        refreshContactList();
         if (pendingStartAfterNotificationSettings) {
             pendingStartAfterNotificationSettings = false;
             if (hasCriticalPermissions()) {
@@ -129,20 +177,21 @@ public class MainActivity extends Activity {
     }
 
     private void startRidingMode() {
-        turnOnEngineVisuals();
+        setEngineOnVisuals(true);
+        playEngineSound();
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_START);
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
             else startService(intent);
         } catch (Exception e) {
-            turnOffEngineVisuals();
+            setEngineOnVisuals(false);
             Toast.makeText(this, "Could not start riding service", Toast.LENGTH_LONG).show();
         }
     }
 
     private void stopRidingMode() {
-        turnOffEngineVisuals();
+        setEngineOnVisuals(false);
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_STOP);
         try {
@@ -151,31 +200,17 @@ public class MainActivity extends Activity {
     }
 
     private void syncUiWithService() {
-        if (RidingForegroundService.isRiding) turnOnEngineVisualsWithoutSound();
-        else turnOffEngineVisuals();
+        setEngineOnVisuals(RidingForegroundService.isRiding);
     }
 
-    private void turnOnEngineVisuals() {
-        turnOnEngineVisualsWithoutSound();
-        playEngineSound();
-    }
-
-    private void turnOnEngineVisualsWithoutSound() {
-        statusText.setText("ENGINE RUNNING");
-        statusText.setTextColor(0xFF22C55E);
-        btnStartEngine.setText("STOP\nENGINE");
-        startPulseAnimation();
-    }
-
-    private void turnOffEngineVisuals() {
-        stopPulseAnimation();
-        statusText.setText("ENGINE OFF");
-        statusText.setTextColor(0xFF94A3B8);
-        btnStartEngine.setText("START\nENGINE");
+    private void setEngineOnVisuals(boolean isOn) {
+        if (backgroundScreen == null) return;
+        backgroundScreen.setImageResource(isOn ? R.drawable.main_screen_on : R.drawable.main_screen_off);
     }
 
     private void playEngineSound() {
         try {
+            uiHandler.removeCallbacksAndMessages(null);
             if (mediaPlayer != null) {
                 mediaPlayer.release();
                 mediaPlayer = null;
@@ -187,41 +222,141 @@ public class MainActivity extends Activity {
                     if (mediaPlayer == mp) mediaPlayer = null;
                 });
                 mediaPlayer.start();
+                uiHandler.postDelayed(() -> {
+                    try {
+                        if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+                            mediaPlayer.stop();
+                            mediaPlayer.release();
+                            mediaPlayer = null;
+                        }
+                    } catch (Exception ignored) { }
+                }, 1800L);
             }
         } catch (Exception ignored) { }
     }
 
-    private void startPulseAnimation() {
-        if (pulseAnimator != null && pulseAnimator.isRunning()) return;
-        pulseRing.setVisibility(View.VISIBLE);
-        pulseRing.animate().alpha(0.55f).scaleX(1.14f).scaleY(1.14f).setDuration(240).start();
-        pulseAnimator = ObjectAnimator.ofPropertyValuesHolder(
-                btnStartEngine,
-                PropertyValuesHolder.ofFloat("scaleX", 1.0f, 1.08f),
-                PropertyValuesHolder.ofFloat("scaleY", 1.0f, 1.08f));
-        pulseAnimator.setDuration(620);
-        pulseAnimator.setRepeatCount(ObjectAnimator.INFINITE);
-        pulseAnimator.setRepeatMode(ObjectAnimator.REVERSE);
-        pulseAnimator.start();
+    private void toggleDrawer(View drawer, boolean fromRight) {
+        if (drawer.getVisibility() == View.VISIBLE) hideDrawer(drawer, fromRight);
+        else showDrawer(drawer, fromRight);
     }
 
-    private void stopPulseAnimation() {
-        if (pulseAnimator != null) {
-            pulseAnimator.cancel();
-            pulseAnimator = null;
+    private void showDrawer(View drawer, boolean fromRight) {
+        hideDrawer(fromRight ? contactsDrawer : commandsDrawer, !fromRight);
+        drawer.setVisibility(View.VISIBLE);
+        drawer.animate().translationX(0f).setDuration(220).start();
+    }
+
+    private void hideDrawer(View drawer, boolean fromRight) {
+        if (drawer == null || drawer.getVisibility() != View.VISIBLE) return;
+        float target = fromRight ? drawer.getWidth() : -drawer.getWidth();
+        if (target == 0f) target = fromRight ? 320f : -320f;
+        drawer.animate().translationX(target).setDuration(200).withEndAction(() -> drawer.setVisibility(View.GONE)).start();
+    }
+
+    private void savePriorityContact() {
+        String name = inputContactName.getText() == null ? "" : inputContactName.getText().toString().trim();
+        String number = inputContactNumber.getText() == null ? "" : inputContactNumber.getText().toString().trim();
+        if (name.length() == 0 || number.length() == 0) {
+            Toast.makeText(this, "Enter both a contact name and a phone number", Toast.LENGTH_SHORT).show();
+            return;
         }
-        btnStartEngine.setScaleX(1f);
-        btnStartEngine.setScaleY(1f);
-        pulseRing.animate().cancel();
-        pulseRing.setAlpha(0f);
-        pulseRing.setScaleX(1f);
-        pulseRing.setScaleY(1f);
-        pulseRing.setVisibility(View.INVISIBLE);
+        UserPreferences.upsertCustomContact(this, name, number);
+        inputContactName.setText("");
+        inputContactNumber.setText("");
+        refreshContactList();
+        Toast.makeText(this, "Priority contact saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void refreshContactList() {
+        contactsListContainer.removeAllViews();
+        List<UserPreferences.CustomContact> contacts = UserPreferences.getCustomContacts(this);
+        if (contacts.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No priority contacts yet.");
+            empty.setTextColor(0xFF64748B);
+            empty.setTextSize(13f);
+            contactsListContainer.addView(empty);
+            return;
+        }
+        for (int i = 0; i < contacts.size(); i++) {
+            final int index = i;
+            UserPreferences.CustomContact contact = contacts.get(i);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(12), dp(12), dp(12));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowParams.bottomMargin = dp(10);
+            row.setLayoutParams(rowParams);
+            row.setBackgroundResource(R.drawable.bg_panel);
+
+            LinearLayout textWrap = new LinearLayout(this);
+            textWrap.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams textWrapParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            textWrap.setLayoutParams(textWrapParams);
+
+            TextView name = new TextView(this);
+            name.setText(contact.name);
+            name.setTextColor(0xFFF8FAFC);
+            name.setTextSize(16f);
+            name.setTypeface(null, android.graphics.Typeface.BOLD);
+
+            TextView number = new TextView(this);
+            number.setText(contact.number);
+            number.setTextColor(0xFF94A3B8);
+            number.setTextSize(13f);
+
+            textWrap.addView(name);
+            textWrap.addView(number);
+
+            Button remove = new Button(this);
+            remove.setText("Remove");
+            remove.setTextSize(12f);
+            remove.setTextColor(0xFFF8FAFC);
+            remove.setBackgroundResource(R.drawable.bg_small_button);
+            remove.setOnClickListener(v -> {
+                UserPreferences.removeCustomContact(MainActivity.this, index);
+                refreshContactList();
+            });
+
+            row.addView(textWrap);
+            row.addView(remove);
+            contactsListContainer.addView(row);
+        }
+    }
+
+    private String buildCommandsPreview() {
+        return "Ride control\n"
+                + "• ride off\n\n"
+                + "Music\n"
+                + "• play music / play song\n"
+                + "• pause music\n"
+                + "• next song / next track\n"
+                + "• pre song / pre music / pre track\n"
+                + "• volume up / volume down / volume max\n\n"
+                + "Calls\n"
+                + "• call [name]\n"
+                + "• first one / second one\n"
+                + "• find more / cancel\n"
+                + "• sim 1 / sim 2 / first / second\n"
+                + "• answer / accept\n"
+                + "• finish call / end call / hang up\n\n"
+                + "Alerts\n"
+                + "• notif off / notification off\n"
+                + "• notif on / notification on\n"
+                + "• mute on / mute off\n";
+    }
+
+    private int dp(int value) {
+        float density = getResources().getDisplayMetrics().density;
+        return Math.round(value * density);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        uiHandler.removeCallbacksAndMessages(null);
         if (mediaPlayer != null) {
             mediaPlayer.release();
             mediaPlayer = null;

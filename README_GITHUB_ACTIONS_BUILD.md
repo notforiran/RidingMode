@@ -1,4 +1,4 @@
-# RidingMode V9 - GitHub Actions APK Build
+# RidingMode V10 - GitHub Actions APK Build
 
 این نسخه برای ساخت APK واقعی از طریق GitHub Actions آماده شده است.
 
@@ -13,7 +13,7 @@ app/build/outputs/apk/debug/app-debug.apk
 این APK توسط Android Gradle Plugin به‌صورت debug امضا می‌شود و در بخش **Artifacts** با نام زیر قابل دانلود است:
 
 ```text
-RidingMode-V9-debug-apk
+RidingMode-V10-debug-apk
 ```
 
 ## روش اجرا در GitHub
@@ -23,7 +23,7 @@ RidingMode-V9-debug-apk
 3. Commit و push کنید.
 4. به تب **Actions** بروید.
 5. workflow با نام **Build RidingMode APK** را اجرا کنید.
-6. بعد از موفق شدن job، پایین صفحه اجرای workflow از بخش **Artifacts** فایل `RidingMode-V9-debug-apk` را دانلود کنید.
+6. بعد از موفق شدن job، پایین صفحه اجرای workflow از بخش **Artifacts** فایل `RidingMode-V10-debug-apk` را دانلود کنید.
 
 ## ساخت دستی روی سیستم دارای Android SDK
 
@@ -35,8 +35,8 @@ gradle --no-daemon --stacktrace :app:assembleDebug
 
 ```text
 applicationId: com.ridingmode.app
-versionCode: 9
-versionName: 1.0.9-v9-audited
+versionCode: 10
+versionName: 1.0.10-v10-command-fixes
 compileSdk: 35
 targetSdk: 35
 minSdk: 26

@@ -1,9 +1,9 @@
-# RidingMode V9 audited source
+# RidingMode V10 audited source
 
 This project is prepared as a standard Android application module.
 
 Main package: `com.ridingmode.app`
-Version: `1.0.9-v9-audited` / `versionCode 9`
+Version: `1.0.10-v10-command-fixes` / `versionCode 10`
 
 ## Local build
 

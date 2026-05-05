@@ -1,78 +1,200 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark"
-    android:padding="22dp">
+    android:background="@color/bg_dark">
 
-    <TextView
-        android:id="@+id/title_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_centerHorizontal="true"
-        android:layout_marginTop="42dp"
-        android:text="RIDING ASSISTANT"
-        android:textColor="@color/text_primary"
-        android:textSize="25sp"
-        android:textStyle="bold"
-        android:letterSpacing="0.11" />
-
-    <TextView
-        android:id="@+id/subtitle_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_below="@id/title_text"
-        android:layout_centerHorizontal="true"
-        android:layout_marginTop="10dp"
-        android:text="Voice control for calls and music"
-        android:textColor="@color/text_muted"
-        android:textSize="13sp" />
+    <ImageView
+        android:id="@+id/background_screen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitXY"
+        android:src="@drawable/main_screen_off" />
 
     <View
-        android:id="@+id/pulse_ring"
-        android:layout_width="244dp"
-        android:layout_height="244dp"
-        android:layout_centerInParent="true"
-        android:background="@drawable/bg_pulse_ring"
-        android:alpha="0.0"
-        android:visibility="invisible" />
+        android:id="@+id/engine_hotspot"
+        android:layout_width="250dp"
+        android:layout_height="250dp"
+        android:layout_gravity="center"
+        android:translationY="120dp"
+        android:background="#00000000"
+        android:clickable="true"
+        android:focusable="true" />
 
-    <Button
-        android:id="@+id/btn_start_engine"
-        android:layout_width="210dp"
-        android:layout_height="210dp"
-        android:layout_centerInParent="true"
-        android:background="@drawable/bg_start_button"
-        android:text="START\nENGINE"
-        android:textColor="@color/text_primary"
-        android:textSize="22sp"
-        android:textStyle="bold"
-        android:elevation="16dp"
-        android:stateListAnimator="@null" />
+    <View
+        android:id="@+id/contacts_hotspot"
+        android:layout_width="180dp"
+        android:layout_height="90dp"
+        android:layout_gravity="bottom|start"
+        android:layout_marginStart="32dp"
+        android:layout_marginBottom="34dp"
+        android:background="#00000000"
+        android:clickable="true"
+        android:focusable="true" />
 
-    <TextView
-        android:id="@+id/status_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_below="@id/btn_start_engine"
-        android:layout_centerHorizontal="true"
-        android:layout_marginTop="30dp"
-        android:text="ENGINE OFF"
-        android:textColor="@color/text_muted"
-        android:textSize="18sp"
-        android:textAllCaps="true"
-        android:textStyle="bold" />
+    <View
+        android:id="@+id/commands_hotspot"
+        android:layout_width="190dp"
+        android:layout_height="90dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="34dp"
+        android:background="#00000000"
+        android:clickable="true"
+        android:focusable="true" />
 
-    <TextView
-        android:id="@+id/help_text"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_alignParentBottom="true"
-        android:background="@drawable/bg_panel"
-        android:gravity="center"
-        android:lineSpacingExtra="4dp"
-        android:padding="14dp"
-        android:text="Commands: play music, pause music, next track, previous track, call [name/number], answer, hang up, ride off"
-        android:textColor="@color/text_muted"
-        android:textSize="12sp" />
-</RelativeLayout>
+    <LinearLayout
+        android:id="@+id/contacts_drawer"
+        android:layout_width="300dp"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_side_panel_left"
+        android:orientation="vertical"
+        android:padding="18dp"
+        android:translationX="-320dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Contacts"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/close_contacts"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:text="Close"
+                android:textColor="@color/text_muted"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Priority contacts always win over phonebook search."
+            android:textColor="@color/text_dim"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/input_contact_name"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/bg_input"
+            android:gravity="center_vertical"
+            android:hint="Contact name"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_dim" />
+
+        <EditText
+            android:id="@+id/input_contact_number"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_input"
+            android:gravity="center_vertical"
+            android:hint="Phone number"
+            android:inputType="phone"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_dim" />
+
+        <Button
+            android:id="@+id/btn_add_contact"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_small_button"
+            android:text="Save priority contact"
+            android:textColor="@color/text_primary" />
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="14dp"
+            android:layout_weight="1"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:id="@+id/contacts_list_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/commands_drawer"
+        android:layout_width="300dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:background="@drawable/bg_side_panel_right"
+        android:orientation="vertical"
+        android:padding="18dp"
+        android:translationX="320dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Commands"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/close_commands"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:text="Close"
+                android:textColor="@color/text_muted"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Voice commands currently available in Riding Mode"
+            android:textColor="@color/text_dim"
+            android:textSize="12sp" />
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="14dp"
+            android:layout_weight="1">
+
+            <TextView
+                android:id="@+id/commands_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="5dp"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp" />
+        </ScrollView>
+    </LinearLayout>
+
+</FrameLayout>
