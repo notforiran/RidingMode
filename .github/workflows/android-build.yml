@@ -1,4 +1,4 @@
-name: Build RidingMode APK
+﻿name: Build RidingMode APK
 
 on:
   push:
@@ -25,18 +25,13 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          sdkmanager --licenses >/dev/null || true
-
       - name: Install required Android SDK packages
         shell: bash
         run: |
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          sdkmanager --install "platform-tools"
+          sdkmanager --install "platforms;android-35"
+          sdkmanager --install "build-tools;35.0.0"
+          sdkmanager --licenses >/dev/null || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
