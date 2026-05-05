@@ -3,10 +3,8 @@ package com.ridingmode.app;
 import android.app.Notification;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -45,23 +43,19 @@ public class MyNotificationListener extends NotificationListenerService {
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        if (!RidingForegroundService.isRiding || sbn == null || sbn.getNotification() == null) return;
-        if (!UserPreferences.areNotificationsEnabled(this) || UserPreferences.isMuted(this)) return;
-        if (getPackageName().equals(sbn.getPackageName())) return;
-        if (shouldIgnoreNotification(sbn)) return;
-
-        String message = buildReadableMessage(sbn);
-        if (message.length() == 0) return;
-        if (wasRecentlyRead(sbn.getPackageName() + "|" + message)) return;
-
-        Intent intent = new Intent(this, RidingForegroundService.class);
-        intent.setAction(RidingForegroundService.ACTION_READ_NOTIFICATION);
-        intent.putExtra("text", message);
         try {
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
-            else startService(intent);
+            if (!RidingForegroundService.isRiding || sbn == null || sbn.getNotification() == null) return;
+            if (!UserPreferences.areNotificationsEnabled(this) || UserPreferences.isMuted(this)) return;
+            if (getPackageName().equals(sbn.getPackageName())) return;
+            if (shouldIgnoreNotification(sbn)) return;
+
+            String message = buildReadableMessage(sbn);
+            if (message.length() == 0) return;
+            if (wasRecentlyRead(sbn.getPackageName() + "|" + message)) return;
+
+            RidingForegroundService.deliverNotificationFromListener(message);
         } catch (Exception e) {
-            try { startService(intent); } catch (Exception ignored) { }
+            Log.w(TAG, "Ignoring notification after safe failure", e);
         }
     }
 
@@ -142,6 +136,8 @@ public class MyNotificationListener extends NotificationListenerService {
             return controllers.get(0);
         } catch (SecurityException e) {
             Log.w(TAG, "Media session access missing", e);
+        } catch (Exception e) {
+            Log.w(TAG, "Media session lookup failed", e);
         }
         return null;
     }

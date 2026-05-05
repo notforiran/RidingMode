@@ -3,7 +3,10 @@ package com.ridingmode.app;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.ActivityNotFoundException;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
@@ -16,6 +19,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.util.DisplayMetrics;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -31,6 +35,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 7001;
 
     private ImageView backgroundScreen;
+    private Bitmap currentBackgroundBitmap;
     private View engineHotspot;
     private View contactsHotspot;
     private View commandsHotspot;
@@ -41,14 +46,17 @@ public class MainActivity extends Activity {
     private LinearLayout contactsListContainer;
     private TextView commandsText;
     private MediaPlayer mediaPlayer;
+    private Runnable engineStopRunnable;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private String[] requestedPermissions;
     private boolean pendingStartAfterNotificationSettings;
+    private Boolean currentVisualEngineOn;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        lockApprovedFullScreenDesign();
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        applyApprovedFullScreenDesign();
         setContentView(R.layout.activity_main);
 
         backgroundScreen = findViewById(R.id.background_screen);
@@ -63,26 +71,30 @@ public class MainActivity extends Activity {
         commandsText = findViewById(R.id.commands_text);
         requestedPermissions = buildRequestedPermissions();
 
-        commandsText.setText(buildCommandsPreview());
-        inputContactName.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        inputContactNumber.setInputType(InputType.TYPE_CLASS_PHONE);
+        if (commandsText != null) commandsText.setText(buildCommandsPreview());
+        if (inputContactName != null) inputContactName.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        if (inputContactNumber != null) inputContactNumber.setInputType(InputType.TYPE_CLASS_PHONE);
 
-        engineHotspot.setOnClickListener(v -> {
-            if (!RidingForegroundService.isRiding) ensureReadyAndStart();
-            else stopRidingMode();
-        });
-        commandsHotspot.setOnClickListener(v -> toggleDrawer(commandsDrawer, true));
-        contactsHotspot.setOnClickListener(v -> toggleDrawer(contactsDrawer, false));
-        findViewById(R.id.close_commands).setOnClickListener(v -> hideDrawer(commandsDrawer, true));
-        findViewById(R.id.close_contacts).setOnClickListener(v -> hideDrawer(contactsDrawer, false));
-        findViewById(R.id.btn_add_contact).setOnClickListener(v -> savePriorityContact());
+        if (engineHotspot != null) {
+            engineHotspot.setOnClickListener(v -> {
+                if (!RidingForegroundService.isRiding) ensureReadyAndStart();
+                else stopRidingMode();
+            });
+        }
+        if (commandsHotspot != null) commandsHotspot.setOnClickListener(v -> toggleDrawer(commandsDrawer, true));
+        if (contactsHotspot != null) contactsHotspot.setOnClickListener(v -> toggleDrawer(contactsDrawer, false));
+        View closeCommands = findViewById(R.id.close_commands);
+        View closeContacts = findViewById(R.id.close_contacts);
+        View addContact = findViewById(R.id.btn_add_contact);
+        if (closeCommands != null) closeCommands.setOnClickListener(v -> hideDrawer(commandsDrawer, true));
+        if (closeContacts != null) closeContacts.setOnClickListener(v -> hideDrawer(contactsDrawer, false));
+        if (addContact != null) addContact.setOnClickListener(v -> savePriorityContact());
 
         syncUiWithService();
         refreshContactList();
     }
 
-    private void lockApprovedFullScreenDesign() {
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
+    private void applyApprovedFullScreenDesign() {
         if (Build.VERSION.SDK_INT >= 21) {
             getWindow().setStatusBarColor(0xFF000000);
             getWindow().setNavigationBarColor(0xFF000000);
@@ -100,7 +112,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        lockApprovedFullScreenDesign();
+        applyApprovedFullScreenDesign();
         syncUiWithService();
         refreshContactList();
         if (pendingStartAfterNotificationSettings) {
@@ -134,7 +146,8 @@ public class MainActivity extends Activity {
         if (!isNotificationServiceEnabled()) {
             pendingStartAfterNotificationSettings = true;
             Toast.makeText(this, "Enable Notification Access for reliable music control, then return to Riding Mode.", Toast.LENGTH_LONG).show();
-            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            if (openNotificationSettingsSafely()) return;
+            startRidingMode();
             return;
         }
         startRidingMode();
@@ -165,10 +178,24 @@ public class MainActivity extends Activity {
         if (!isNotificationServiceEnabled()) {
             pendingStartAfterNotificationSettings = true;
             Toast.makeText(this, "Enable Notification Access for reliable music control, then return to Riding Mode.", Toast.LENGTH_LONG).show();
-            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            if (openNotificationSettingsSafely()) return;
+            startRidingMode();
             return;
         }
         startRidingMode();
+    }
+
+    private boolean openNotificationSettingsSafely() {
+        try {
+            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            return true;
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "Notification Access settings not found. Riding Mode will start with fallback music control.", Toast.LENGTH_LONG).show();
+            return false;
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not open Notification Access settings. Riding Mode will start with fallback music control.", Toast.LENGTH_LONG).show();
+            return false;
+        }
     }
 
     private boolean isNotificationServiceEnabled() {
@@ -178,12 +205,12 @@ public class MainActivity extends Activity {
 
     private void startRidingMode() {
         setEngineOnVisuals(true);
-        playEngineSound();
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_START);
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
             else startService(intent);
+            playEngineSound();
         } catch (Exception e) {
             setEngineOnVisuals(false);
             Toast.makeText(this, "Could not start riding service", Toast.LENGTH_LONG).show();
@@ -205,12 +232,74 @@ public class MainActivity extends Activity {
 
     private void setEngineOnVisuals(boolean isOn) {
         if (backgroundScreen == null) return;
-        backgroundScreen.setImageResource(isOn ? R.drawable.main_screen_on : R.drawable.main_screen_off);
+        if (currentVisualEngineOn != null
+                && currentVisualEngineOn == isOn
+                && currentBackgroundBitmap != null
+                && !currentBackgroundBitmap.isRecycled()) {
+            return;
+        }
+        int resId = isOn ? R.drawable.main_screen_on : R.drawable.main_screen_off;
+        try {
+            Bitmap bitmap = decodeBackgroundSafely(resId);
+            if (bitmap != null) {
+                releaseCurrentBackground();
+                currentBackgroundBitmap = bitmap;
+                currentVisualEngineOn = isOn;
+                backgroundScreen.setImageBitmap(currentBackgroundBitmap);
+            }
+        } catch (OutOfMemoryError oom) {
+            releaseCurrentBackground();
+            try {
+                backgroundScreen.setBackgroundColor(isOn ? 0xFF031208 : 0xFF150407);
+            } catch (Exception ignored) { }
+            currentVisualEngineOn = isOn;
+            Toast.makeText(this, "Low memory while loading Riding Mode design", Toast.LENGTH_SHORT).show();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private Bitmap decodeBackgroundSafely(int resId) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeResource(getResources(), resId, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int targetW = Math.max(metrics.widthPixels, 360);
+        int targetH = Math.max(metrics.heightPixels, 640);
+
+        int sample = 1;
+        while ((bounds.outWidth / sample) > targetW * 1.25f || (bounds.outHeight / sample) > targetH * 1.25f) {
+            sample *= 2;
+        }
+
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = sample;
+        options.inPreferredConfig = Bitmap.Config.RGB_565;
+        options.inDither = true;
+        return BitmapFactory.decodeResource(getResources(), resId, options);
+    }
+
+    private void releaseCurrentBackground() {
+        try {
+            if (backgroundScreen != null) backgroundScreen.setImageDrawable(null);
+            if (currentBackgroundBitmap != null && !currentBackgroundBitmap.isRecycled()) {
+                currentBackgroundBitmap.recycle();
+            }
+        } catch (Exception ignored) {
+        } finally {
+            currentBackgroundBitmap = null;
+            currentVisualEngineOn = null;
+        }
     }
 
     private void playEngineSound() {
+        if (UserPreferences.isMuted(this)) return;
         try {
-            uiHandler.removeCallbacksAndMessages(null);
+            if (engineStopRunnable != null) {
+                uiHandler.removeCallbacks(engineStopRunnable);
+                engineStopRunnable = null;
+            }
             if (mediaPlayer != null) {
                 mediaPlayer.release();
                 mediaPlayer = null;
@@ -222,7 +311,7 @@ public class MainActivity extends Activity {
                     if (mediaPlayer == mp) mediaPlayer = null;
                 });
                 mediaPlayer.start();
-                uiHandler.postDelayed(() -> {
+                engineStopRunnable = () -> {
                     try {
                         if (mediaPlayer != null && mediaPlayer.isPlaying()) {
                             mediaPlayer.stop();
@@ -230,17 +319,20 @@ public class MainActivity extends Activity {
                             mediaPlayer = null;
                         }
                     } catch (Exception ignored) { }
-                }, 1800L);
+                };
+                uiHandler.postDelayed(engineStopRunnable, 1800L);
             }
         } catch (Exception ignored) { }
     }
 
     private void toggleDrawer(View drawer, boolean fromRight) {
+        if (drawer == null) return;
         if (drawer.getVisibility() == View.VISIBLE) hideDrawer(drawer, fromRight);
         else showDrawer(drawer, fromRight);
     }
 
     private void showDrawer(View drawer, boolean fromRight) {
+        if (drawer == null) return;
         hideDrawer(fromRight ? contactsDrawer : commandsDrawer, !fromRight);
         drawer.setVisibility(View.VISIBLE);
         drawer.animate().translationX(0f).setDuration(220).start();
@@ -254,6 +346,7 @@ public class MainActivity extends Activity {
     }
 
     private void savePriorityContact() {
+        if (inputContactName == null || inputContactNumber == null) return;
         String name = inputContactName.getText() == null ? "" : inputContactName.getText().toString().trim();
         String number = inputContactNumber.getText() == null ? "" : inputContactNumber.getText().toString().trim();
         if (name.length() == 0 || number.length() == 0) {
@@ -268,6 +361,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshContactList() {
+        if (contactsListContainer == null) return;
         contactsListContainer.removeAllViews();
         List<UserPreferences.CustomContact> contacts = UserPreferences.getCustomContacts(this);
         if (contacts.isEmpty()) {
@@ -355,11 +449,15 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
-        uiHandler.removeCallbacksAndMessages(null);
+        if (engineStopRunnable != null) {
+            uiHandler.removeCallbacks(engineStopRunnable);
+            engineStopRunnable = null;
+        }
         if (mediaPlayer != null) {
             mediaPlayer.release();
             mediaPlayer = null;
         }
+        releaseCurrentBackground();
+        super.onDestroy();
     }
 }

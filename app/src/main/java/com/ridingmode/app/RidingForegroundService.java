@@ -7,6 +7,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.AudioAttributes;
@@ -48,6 +49,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private static final int CONTACT_PAGE_SIZE = 2;
 
     public static boolean isRiding = false;
+    private static RidingForegroundService activeInstance;
 
     private AudioManager audioManager;
     private SpeechRecognizer speechRecognizer;
@@ -61,6 +63,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private AudioFocusRequest activeFocusRequest;
     private boolean stopAfterCurrentSpeech;
     private boolean speechOutputActive;
+    private boolean foregroundPromoted;
     private long utteranceCounter;
     private int currentCallState = TelephonyManager.CALL_STATE_IDLE;
 
@@ -71,6 +74,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     @Override
     public void onCreate() {
         super.onCreate();
+        activeInstance = this;
         mainHandler = new Handler(Looper.getMainLooper());
         audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         telephonyManager = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
@@ -95,15 +99,29 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         return START_STICKY;
     }
 
+
+    public static void deliverNotificationFromListener(String text) {
+        RidingForegroundService service = activeInstance;
+        if (service == null || text == null || text.trim().length() == 0) return;
+        if (!isRiding || UserPreferences.isMuted(service) || !UserPreferences.areNotificationsEnabled(service)) return;
+        Handler handler = service.mainHandler;
+        if (handler != null) {
+            handler.post(() -> service.speakNotification(text));
+        } else {
+            service.speakNotification(text);
+        }
+    }
+
     private void startForegroundMode() {
-        if (isRiding) return;
         createNotificationChannel();
         Notification notification = buildNotification();
-        try {
-            startForeground(NOTIF_ID, notification);
-        } catch (Exception e) {
+        if (!foregroundPromoted && !promoteToForegroundSafely(notification)) {
             isRiding = false;
             stopSelf();
+            return;
+        }
+        if (isRiding) {
+            startListening();
             return;
         }
         isRiding = true;
@@ -114,8 +132,39 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (!UserPreferences.isMuted(this)) speakSystem("Riding mode active");
     }
 
+    private boolean promoteToForegroundSafely(Notification notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } else {
+                startForeground(NOTIF_ID, notification);
+            }
+            foregroundPromoted = true;
+            return true;
+        } catch (SecurityException e) {
+            try {
+                startForeground(NOTIF_ID, notification);
+                foregroundPromoted = true;
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        } catch (RuntimeException e) {
+            try {
+                startForeground(NOTIF_ID, notification);
+                foregroundPromoted = true;
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private void shutdownRidingMode(boolean destroySpeech) {
         isRiding = false;
+        foregroundPromoted = false;
         speechOutputActive = false;
         clearPendingContactChoice();
         clearPendingCallRequest();
@@ -729,15 +778,20 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private void controlMusic(int keyCode, String confirmation, boolean speakConfirmation) {
-        MediaController controller = MyNotificationListener.getActiveController();
-        if (controller != null && controller.getTransportControls() != null) {
-            if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) controller.getTransportControls().play();
-            else if (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) controller.getTransportControls().pause();
-            else if (keyCode == KeyEvent.KEYCODE_MEDIA_NEXT) controller.getTransportControls().skipToNext();
-            else if (keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS) controller.getTransportControls().skipToPrevious();
-        } else {
-            dispatchMediaKey(keyCode);
+        boolean handledByController = false;
+        try {
+            MediaController controller = MyNotificationListener.getActiveController();
+            if (controller != null && controller.getTransportControls() != null) {
+                if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) controller.getTransportControls().play();
+                else if (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) controller.getTransportControls().pause();
+                else if (keyCode == KeyEvent.KEYCODE_MEDIA_NEXT) controller.getTransportControls().skipToNext();
+                else if (keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS) controller.getTransportControls().skipToPrevious();
+                handledByController = true;
+            }
+        } catch (Exception ignored) {
+            handledByController = false;
         }
+        if (!handledByController) dispatchMediaKey(keyCode);
         if (speakConfirmation) speakSystem(confirmation);
     }
 
@@ -847,8 +901,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             Bundle params = new Bundle();
             params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
             String utteranceId = "RidingModeUtterance" + (++utteranceCounter);
-            tts.speak(text, flush ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, params, utteranceId);
-        } catch (Exception ignored) { }
+            int result = tts.speak(text, flush ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, params, utteranceId);
+            if (result == TextToSpeech.ERROR) {
+                onSpeechFinished();
+            }
+        } catch (Exception ignored) {
+            onSpeechFinished();
+        }
     }
 
     private void requestDuckFocus() {
@@ -926,7 +985,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         return builder
                 .setContentTitle("Riding Mode")
                 .setContentText("Listening for music, call, sim, mute, notification, and ride off commands")
-                .setSmallIcon(R.drawable.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_riding)
                 .setContentIntent(contentPendingIntent)
                 .setOngoing(true)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
@@ -976,8 +1035,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             tts.shutdown();
             tts = null;
         }
-        if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
-        else stopForeground(true);
+        try {
+            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
+            else stopForeground(true);
+        } catch (Exception ignored) { }
+        foregroundPromoted = false;
+        if (activeInstance == this) activeInstance = null;
         super.onDestroy();
     }
 
