@@ -2,54 +2,109 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark">
+    android:background="@drawable/bg_app_canvas">
 
-    <ImageView
-        android:id="@+id/background_screen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitXY" />
+    <TextView
+        android:id="@+id/title_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="54dp"
+        android:fontFamily="sans-serif-medium"
+        android:letterSpacing="0.04"
+        android:text="Ride mode"
+        android:textColor="@color/text_primary"
+        android:textSize="31sp"
+        android:textStyle="bold" />
 
-    <View
-        android:id="@+id/engine_hotspot"
-        android:layout_width="250dp"
-        android:layout_height="250dp"
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
         android:layout_gravity="center"
-        android:translationY="120dp"
-        android:background="#00000000"
-        android:clickable="true"
-        android:focusable="true" />
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
 
-    <View
-        android:id="@+id/contacts_hotspot"
-        android:layout_width="180dp"
-        android:layout_height="90dp"
+        <FrameLayout
+            android:layout_width="240dp"
+            android:layout_height="240dp"
+            android:foregroundGravity="center">
+
+            <Button
+                android:id="@+id/engine_button"
+                android:layout_width="222dp"
+                android:layout_height="222dp"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_engine_button_off"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text=""
+                android:textAllCaps="false" />
+
+            <TextView
+                android:id="@+id/engine_symbol"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:clickable="false"
+                android:focusable="false"
+                android:fontFamily="sans-serif-light"
+                android:includeFontPadding="false"
+                android:text="⏻"
+                android:textColor="@color/accent_red_hot"
+                android:textSize="62sp"
+                android:textStyle="bold" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/engine_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:fontFamily="sans-serif-medium"
+            android:letterSpacing="0.03"
+            android:text="Engine off"
+            android:textColor="@color/accent_red_hot"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/contacts_button"
+        android:layout_width="138dp"
+        android:layout_height="52dp"
         android:layout_gravity="bottom|start"
-        android:layout_marginStart="32dp"
-        android:layout_marginBottom="34dp"
-        android:background="#00000000"
-        android:clickable="true"
-        android:focusable="true" />
+        android:layout_marginStart="22dp"
+        android:layout_marginBottom="44dp"
+        android:background="@drawable/bg_small_button"
+        android:fontFamily="sans-serif-medium"
+        android:text="Contacts"
+        android:textAllCaps="false"
+        android:textColor="@color/text_primary"
+        android:textSize="15sp" />
 
-    <View
-        android:id="@+id/commands_hotspot"
-        android:layout_width="190dp"
-        android:layout_height="90dp"
+    <Button
+        android:id="@+id/commands_button"
+        android:layout_width="138dp"
+        android:layout_height="52dp"
         android:layout_gravity="bottom|end"
-        android:layout_marginEnd="32dp"
-        android:layout_marginBottom="34dp"
-        android:background="#00000000"
-        android:clickable="true"
-        android:focusable="true" />
+        android:layout_marginEnd="22dp"
+        android:layout_marginBottom="44dp"
+        android:background="@drawable/bg_small_button"
+        android:fontFamily="sans-serif-medium"
+        android:text="Commands"
+        android:textAllCaps="false"
+        android:textColor="@color/text_primary"
+        android:textSize="15sp" />
 
     <LinearLayout
         android:id="@+id/contacts_drawer"
-        android:layout_width="300dp"
+        android:layout_width="310dp"
         android:layout_height="match_parent"
         android:background="@drawable/bg_side_panel_left"
         android:orientation="vertical"
         android:padding="18dp"
-        android:translationX="-320dp"
+        android:translationX="-330dp"
         android:visibility="gone">
 
         <LinearLayout
@@ -62,6 +117,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:fontFamily="sans-serif-medium"
                 android:text="Contacts"
                 android:textColor="@color/text_primary"
                 android:textSize="22sp"
@@ -76,14 +132,6 @@
                 android:textColor="@color/text_muted"
                 android:textSize="13sp" />
         </LinearLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Priority contacts always win over phonebook search."
-            android:textColor="@color/text_dim"
-            android:textSize="12sp" />
 
         <EditText
             android:id="@+id/input_contact_name"
@@ -118,7 +166,8 @@
             android:layout_height="46dp"
             android:layout_marginTop="12dp"
             android:background="@drawable/bg_small_button"
-            android:text="Save priority contact"
+            android:text="Save"
+            android:textAllCaps="false"
             android:textColor="@color/text_primary" />
 
         <ScrollView
@@ -138,13 +187,13 @@
 
     <LinearLayout
         android:id="@+id/commands_drawer"
-        android:layout_width="300dp"
+        android:layout_width="310dp"
         android:layout_height="match_parent"
         android:layout_gravity="end"
         android:background="@drawable/bg_side_panel_right"
         android:orientation="vertical"
         android:padding="18dp"
-        android:translationX="320dp"
+        android:translationX="330dp"
         android:visibility="gone">
 
         <LinearLayout
@@ -157,6 +206,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:fontFamily="sans-serif-medium"
                 android:text="Commands"
                 android:textColor="@color/text_primary"
                 android:textSize="22sp"
@@ -171,14 +221,6 @@
                 android:textColor="@color/text_muted"
                 android:textSize="13sp" />
         </LinearLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Voice commands currently available in Riding Mode"
-            android:textColor="@color/text_dim"
-            android:textSize="12sp" />
 
         <ScrollView
             android:layout_width="match_parent"

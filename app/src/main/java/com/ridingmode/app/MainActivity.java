@@ -2,27 +2,26 @@ package com.ridingmode.app;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.Intent;
 import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.util.DisplayMetrics;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -34,11 +33,11 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 7001;
 
-    private ImageView backgroundScreen;
-    private Bitmap currentBackgroundBitmap;
-    private View engineHotspot;
-    private View contactsHotspot;
-    private View commandsHotspot;
+    private Button engineButton;
+    private Button contactsButton;
+    private Button commandsButton;
+    private TextView engineStatus;
+    private TextView engineSymbol;
     private View contactsDrawer;
     private View commandsDrawer;
     private EditText inputContactName;
@@ -46,11 +45,14 @@ public class MainActivity extends Activity {
     private LinearLayout contactsListContainer;
     private TextView commandsText;
     private MediaPlayer mediaPlayer;
+    private SpeechRecognizer activitySpeechRecognizer;
+    private Intent activitySpeechIntent;
+    private boolean activityListening;
+    private Runnable activityRestartRunnable;
     private Runnable engineStopRunnable;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private String[] requestedPermissions;
     private boolean pendingStartAfterNotificationSettings;
-    private Boolean currentVisualEngineOn;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,10 +61,11 @@ public class MainActivity extends Activity {
         applyApprovedFullScreenDesign();
         setContentView(R.layout.activity_main);
 
-        backgroundScreen = findViewById(R.id.background_screen);
-        engineHotspot = findViewById(R.id.engine_hotspot);
-        contactsHotspot = findViewById(R.id.contacts_hotspot);
-        commandsHotspot = findViewById(R.id.commands_hotspot);
+        engineButton = findViewById(R.id.engine_button);
+        contactsButton = findViewById(R.id.contacts_button);
+        commandsButton = findViewById(R.id.commands_button);
+        engineStatus = findViewById(R.id.engine_status);
+        engineSymbol = findViewById(R.id.engine_symbol);
         contactsDrawer = findViewById(R.id.contacts_drawer);
         commandsDrawer = findViewById(R.id.commands_drawer);
         inputContactName = findViewById(R.id.input_contact_name);
@@ -75,14 +78,15 @@ public class MainActivity extends Activity {
         if (inputContactName != null) inputContactName.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
         if (inputContactNumber != null) inputContactNumber.setInputType(InputType.TYPE_CLASS_PHONE);
 
-        if (engineHotspot != null) {
-            engineHotspot.setOnClickListener(v -> {
-                if (!RidingForegroundService.isRiding) ensureReadyAndStart();
-                else stopRidingMode();
-            });
-        }
-        if (commandsHotspot != null) commandsHotspot.setOnClickListener(v -> toggleDrawer(commandsDrawer, true));
-        if (contactsHotspot != null) contactsHotspot.setOnClickListener(v -> toggleDrawer(contactsDrawer, false));
+        View.OnClickListener engineClickListener = v -> {
+            if (!RidingForegroundService.isRiding) ensureReadyAndStart();
+            else stopRidingMode();
+        };
+        if (engineButton != null) engineButton.setOnClickListener(engineClickListener);
+        if (engineSymbol != null) engineSymbol.setOnClickListener(engineClickListener);
+        if (commandsButton != null) commandsButton.setOnClickListener(v -> toggleDrawer(commandsDrawer, true));
+        if (contactsButton != null) contactsButton.setOnClickListener(v -> toggleDrawer(contactsDrawer, false));
+
         View closeCommands = findViewById(R.id.close_commands);
         View closeContacts = findViewById(R.id.close_contacts);
         View addContact = findViewById(R.id.btn_add_contact);
@@ -96,8 +100,8 @@ public class MainActivity extends Activity {
 
     private void applyApprovedFullScreenDesign() {
         if (Build.VERSION.SDK_INT >= 21) {
-            getWindow().setStatusBarColor(0xFF000000);
-            getWindow().setNavigationBarColor(0xFF000000);
+            getWindow().setStatusBarColor(0xFF262B31);
+            getWindow().setNavigationBarColor(0xFF262B31);
         }
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().getDecorView().setSystemUiVisibility(
@@ -115,15 +119,27 @@ public class MainActivity extends Activity {
         applyApprovedFullScreenDesign();
         syncUiWithService();
         refreshContactList();
+        if (RidingForegroundService.isRiding && hasCriticalPermissions()) {
+            RidingForegroundService.setActivityVoiceActive(true);
+            initActivityVoiceRecognizer();
+            scheduleActivityVoiceRestart(700L);
+        }
         if (pendingStartAfterNotificationSettings) {
             pendingStartAfterNotificationSettings = false;
             if (hasCriticalPermissions()) {
                 if (!isNotificationServiceEnabled()) {
-                    Toast.makeText(this, "Notification Access is still off. Music control will use fallback media keys.", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "Notification access is still off. Music control will use fallback media keys.", Toast.LENGTH_LONG).show();
                 }
                 startRidingMode();
             }
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        stopActivityVoiceRecognition();
+        RidingForegroundService.setActivityVoiceActive(false);
     }
 
     private String[] buildRequestedPermissions() {
@@ -145,7 +161,7 @@ public class MainActivity extends Activity {
         }
         if (!isNotificationServiceEnabled()) {
             pendingStartAfterNotificationSettings = true;
-            Toast.makeText(this, "Enable Notification Access for reliable music control, then return to Riding Mode.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Enable notification access for reliable music control, then return to Ride mode.", Toast.LENGTH_LONG).show();
             if (openNotificationSettingsSafely()) return;
             startRidingMode();
             return;
@@ -169,7 +185,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != REQUEST_PERMISSIONS) return;
         if (!hasCriticalPermissions()) {
-            Toast.makeText(this, "Microphone permission is required for riding mode", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Microphone permission is required for Ride mode", Toast.LENGTH_LONG).show();
             return;
         }
         if (!hasAllRuntimePermissions()) {
@@ -177,7 +193,7 @@ public class MainActivity extends Activity {
         }
         if (!isNotificationServiceEnabled()) {
             pendingStartAfterNotificationSettings = true;
-            Toast.makeText(this, "Enable Notification Access for reliable music control, then return to Riding Mode.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Enable notification access for reliable music control, then return to Ride mode.", Toast.LENGTH_LONG).show();
             if (openNotificationSettingsSafely()) return;
             startRidingMode();
             return;
@@ -190,10 +206,10 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
             return true;
         } catch (ActivityNotFoundException e) {
-            Toast.makeText(this, "Notification Access settings not found. Riding Mode will start with fallback music control.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Notification access settings not found. Ride mode will start with fallback music control.", Toast.LENGTH_LONG).show();
             return false;
         } catch (Exception e) {
-            Toast.makeText(this, "Could not open Notification Access settings. Riding Mode will start with fallback music control.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Could not open notification access settings. Ride mode will start with fallback music control.", Toast.LENGTH_LONG).show();
             return false;
         }
     }
@@ -210,15 +226,20 @@ public class MainActivity extends Activity {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
             else startService(intent);
+            RidingForegroundService.setActivityVoiceActive(true);
+            initActivityVoiceRecognizer();
+            scheduleActivityVoiceRestart(1200L);
             playEngineSound();
         } catch (Exception e) {
             setEngineOnVisuals(false);
-            Toast.makeText(this, "Could not start riding service", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Could not start Ride mode service", Toast.LENGTH_LONG).show();
         }
     }
 
     private void stopRidingMode() {
         setEngineOnVisuals(false);
+        RidingForegroundService.setActivityVoiceActive(false);
+        stopActivityVoiceRecognition();
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_STOP);
         try {
@@ -231,66 +252,13 @@ public class MainActivity extends Activity {
     }
 
     private void setEngineOnVisuals(boolean isOn) {
-        if (backgroundScreen == null) return;
-        if (currentVisualEngineOn != null
-                && currentVisualEngineOn == isOn
-                && currentBackgroundBitmap != null
-                && !currentBackgroundBitmap.isRecycled()) {
-            return;
+        int color = isOn ? 0xFF6BFFAF : 0xFFFF5F75;
+        if (engineButton != null) engineButton.setBackgroundResource(isOn ? R.drawable.bg_engine_button_on : R.drawable.bg_engine_button_off);
+        if (engineStatus != null) {
+            engineStatus.setText(isOn ? "Engine on" : "Engine off");
+            engineStatus.setTextColor(color);
         }
-        int resId = isOn ? R.drawable.main_screen_on : R.drawable.main_screen_off;
-        try {
-            Bitmap bitmap = decodeBackgroundSafely(resId);
-            if (bitmap != null) {
-                releaseCurrentBackground();
-                currentBackgroundBitmap = bitmap;
-                currentVisualEngineOn = isOn;
-                backgroundScreen.setImageBitmap(currentBackgroundBitmap);
-            }
-        } catch (OutOfMemoryError oom) {
-            releaseCurrentBackground();
-            try {
-                backgroundScreen.setBackgroundColor(isOn ? 0xFF031208 : 0xFF150407);
-            } catch (Exception ignored) { }
-            currentVisualEngineOn = isOn;
-            Toast.makeText(this, "Low memory while loading Riding Mode design", Toast.LENGTH_SHORT).show();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private Bitmap decodeBackgroundSafely(int resId) {
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeResource(getResources(), resId, bounds);
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
-
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        int targetW = Math.max(metrics.widthPixels, 360);
-        int targetH = Math.max(metrics.heightPixels, 640);
-
-        int sample = 1;
-        while ((bounds.outWidth / sample) > targetW * 1.25f || (bounds.outHeight / sample) > targetH * 1.25f) {
-            sample *= 2;
-        }
-
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = sample;
-        options.inPreferredConfig = Bitmap.Config.RGB_565;
-        options.inDither = true;
-        return BitmapFactory.decodeResource(getResources(), resId, options);
-    }
-
-    private void releaseCurrentBackground() {
-        try {
-            if (backgroundScreen != null) backgroundScreen.setImageDrawable(null);
-            if (currentBackgroundBitmap != null && !currentBackgroundBitmap.isRecycled()) {
-                currentBackgroundBitmap.recycle();
-            }
-        } catch (Exception ignored) {
-        } finally {
-            currentBackgroundBitmap = null;
-            currentVisualEngineOn = null;
-        }
+        if (engineSymbol != null) engineSymbol.setTextColor(color);
     }
 
     private void playEngineSound() {
@@ -367,7 +335,7 @@ public class MainActivity extends Activity {
         if (contacts.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText("No priority contacts yet.");
-            empty.setTextColor(0xFF64748B);
+            empty.setTextColor(0xFFA6ADB7);
             empty.setTextSize(13f);
             contactsListContainer.addView(empty);
             return;
@@ -392,13 +360,13 @@ public class MainActivity extends Activity {
 
             TextView name = new TextView(this);
             name.setText(contact.name);
-            name.setTextColor(0xFFF8FAFC);
+            name.setTextColor(0xFFF7F8FA);
             name.setTextSize(16f);
             name.setTypeface(null, android.graphics.Typeface.BOLD);
 
             TextView number = new TextView(this);
             number.setText(contact.number);
-            number.setTextColor(0xFF94A3B8);
+            number.setTextColor(0xFFCBD0D7);
             number.setTextSize(13f);
 
             textWrap.addView(name);
@@ -407,7 +375,7 @@ public class MainActivity extends Activity {
             Button remove = new Button(this);
             remove.setText("Remove");
             remove.setTextSize(12f);
-            remove.setTextColor(0xFFF8FAFC);
+            remove.setTextColor(0xFFF7F8FA);
             remove.setBackgroundResource(R.drawable.bg_small_button);
             remove.setOnClickListener(v -> {
                 UserPreferences.removeCustomContact(MainActivity.this, index);
@@ -420,26 +388,188 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void initActivityVoiceRecognizer() {
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) return;
+        if (activitySpeechRecognizer != null && activitySpeechIntent != null) return;
+        try {
+            activitySpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            activitySpeechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L);
+            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+            activitySpeechRecognizer.setRecognitionListener(new RecognitionListener() {
+                @Override public void onReadyForSpeech(Bundle params) { activityListening = true; }
+                @Override public void onBeginningOfSpeech() { activityListening = true; }
+                @Override public void onRmsChanged(float rmsdB) { }
+                @Override public void onBufferReceived(byte[] buffer) { }
+                @Override public void onEndOfSpeech() { activityListening = false; }
+                @Override public void onPartialResults(Bundle partialResults) { }
+                @Override public void onEvent(int eventType, Bundle params) { }
+
+                @Override
+                public void onError(int error) {
+                    activityListening = false;
+                    if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                        rebuildActivityVoiceRecognizer();
+                        scheduleActivityVoiceRestart(1200L);
+                    } else {
+                        scheduleActivityVoiceRestart(error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ? 450L : 900L);
+                    }
+                }
+
+                @Override
+                public void onResults(Bundle results) {
+                    activityListening = false;
+                    ArrayList<String> matches = results == null ? null : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    if (matches != null && !matches.isEmpty()) {
+                        for (String match : matches) {
+                            if (match == null) continue;
+                            String normalized = normalizeActivityCommand(match);
+                            if (looksLikeActivityCommand(normalized)) {
+                                RidingForegroundService.deliverVoiceCommand(match);
+                                scheduleActivityVoiceRestart(700L);
+                                return;
+                            }
+                        }
+                        RidingForegroundService.deliverVoiceCommand(matches.get(0));
+                    }
+                    scheduleActivityVoiceRestart(700L);
+                }
+            });
+        } catch (Exception ignored) {
+            activitySpeechRecognizer = null;
+            activitySpeechIntent = null;
+            activityListening = false;
+        }
+    }
+
+    private void rebuildActivityVoiceRecognizer() {
+        try {
+            if (activitySpeechRecognizer != null) activitySpeechRecognizer.destroy();
+        } catch (Exception ignored) { }
+        activitySpeechRecognizer = null;
+        activitySpeechIntent = null;
+        activityListening = false;
+        initActivityVoiceRecognizer();
+    }
+
+    private void scheduleActivityVoiceRestart(long delayMs) {
+        if (!RidingForegroundService.isRiding || uiHandler == null) return;
+        if (activityRestartRunnable != null) uiHandler.removeCallbacks(activityRestartRunnable);
+        activityRestartRunnable = this::startActivityVoiceRecognition;
+        uiHandler.postDelayed(activityRestartRunnable, Math.max(250L, delayMs));
+    }
+
+    private void startActivityVoiceRecognition() {
+        if (!RidingForegroundService.isRiding || activityListening) return;
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        initActivityVoiceRecognizer();
+        if (activitySpeechRecognizer == null || activitySpeechIntent == null) return;
+        try {
+            RidingForegroundService.setActivityVoiceActive(true);
+            activityListening = true;
+            activitySpeechRecognizer.startListening(activitySpeechIntent);
+        } catch (Exception e) {
+            activityListening = false;
+            rebuildActivityVoiceRecognizer();
+            scheduleActivityVoiceRestart(1200L);
+        }
+    }
+
+    private void stopActivityVoiceRecognition() {
+        if (uiHandler != null && activityRestartRunnable != null) uiHandler.removeCallbacks(activityRestartRunnable);
+        activityListening = false;
+        if (activitySpeechRecognizer != null) {
+            try { activitySpeechRecognizer.cancel(); } catch (Exception ignored) { }
+        }
+    }
+
+    private void destroyActivityVoiceRecognizer() {
+        stopActivityVoiceRecognition();
+        if (activitySpeechRecognizer != null) {
+            try { activitySpeechRecognizer.destroy(); } catch (Exception ignored) { }
+        }
+        activitySpeechRecognizer = null;
+        activitySpeechIntent = null;
+    }
+
+    private String normalizeActivityCommand(String raw) {
+        if (raw == null) return "";
+        return raw.toLowerCase(Locale.US).replaceAll("[^a-z0-9+ ]", " ").replaceAll("\\s+", " ").trim();
+    }
+
+    private boolean looksLikeActivityCommand(String command) {
+        if (command.length() == 0) return false;
+        if (command.startsWith("call ")) return true;
+        return command.equals("play")
+                || command.contains("play music")
+                || command.contains("play song")
+                || command.contains("pause")
+                || command.contains("next")
+                || command.contains("previous")
+                || command.contains("pre song")
+                || command.contains("pre music")
+                || command.contains("pre track")
+                || command.contains("volume")
+                || command.contains("ride off")
+                || command.contains("right off")
+                || command.contains("engine off")
+                || command.contains("motor off")
+                || command.contains("notif")
+                || command.contains("notification")
+                || command.equals("mute on")
+                || command.equals("mute off")
+                || command.equals("answer")
+                || command.equals("accept")
+                || command.equals("finish call")
+                || command.equals("end call")
+                || command.equals("hang up")
+                || command.equals("first")
+                || command.equals("second")
+                || command.equals("first one")
+                || command.equals("second one")
+                || command.contains("sim one")
+                || command.contains("sim two")
+                || command.contains("find more")
+                || command.equals("cancel");
+    }
+
     private String buildCommandsPreview() {
-        return "Ride control\n"
-                + "• ride off\n\n"
-                + "Music\n"
-                + "• play music / play song\n"
-                + "• pause music\n"
-                + "• next song / next track\n"
-                + "• pre song / pre music / pre track\n"
-                + "• volume up / volume down / volume max\n\n"
-                + "Calls\n"
-                + "• call [name]\n"
-                + "• first one / second one\n"
-                + "• find more / cancel\n"
-                + "• sim 1 / sim 2 / first / second\n"
-                + "• answer / accept\n"
-                + "• finish call / end call / hang up\n\n"
-                + "Alerts\n"
-                + "• notif off / notification off\n"
-                + "• notif on / notification on\n"
-                + "• mute on / mute off\n";
+        return "Ride off\n"
+                + "Play music\n"
+                + "Play song\n"
+                + "Pause music\n"
+                + "Next song\n"
+                + "Next track\n"
+                + "Pre song\n"
+                + "Pre music\n"
+                + "Pre track\n"
+                + "Volume up\n"
+                + "Volume down\n"
+                + "Volume max\n"
+                + "Call [name]\n"
+                + "First one\n"
+                + "Second one\n"
+                + "Find more\n"
+                + "Cancel\n"
+                + "Sim 1\n"
+                + "Sim 2\n"
+                + "First\n"
+                + "Second\n"
+                + "Answer\n"
+                + "Accept\n"
+                + "Finish call\n"
+                + "End call\n"
+                + "Hang up\n"
+                + "Notif off\n"
+                + "Notif on\n"
+                + "Mute on\n"
+                + "Mute off\n";
     }
 
     private int dp(int value) {
@@ -449,6 +579,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        destroyActivityVoiceRecognizer();
+        RidingForegroundService.setActivityVoiceActive(false);
         if (engineStopRunnable != null) {
             uiHandler.removeCallbacks(engineStopRunnable);
             engineStopRunnable = null;
@@ -457,7 +589,6 @@ public class MainActivity extends Activity {
             mediaPlayer.release();
             mediaPlayer = null;
         }
-        releaseCurrentBackground();
         super.onDestroy();
     }
 }

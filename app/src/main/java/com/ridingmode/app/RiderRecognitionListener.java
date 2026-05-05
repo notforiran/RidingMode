@@ -12,21 +12,21 @@ public class RiderRecognitionListener implements RecognitionListener {
         this.service = service;
     }
 
-    @Override public void onReadyForSpeech(Bundle params) { }
-    @Override public void onBeginningOfSpeech() { }
+    @Override public void onReadyForSpeech(Bundle params) { service.onRecognizerReady(); }
+    @Override public void onBeginningOfSpeech() { service.onRecognizerSpeechStarted(); }
     @Override public void onRmsChanged(float rmsdB) { }
     @Override public void onBufferReceived(byte[] buffer) { }
-    @Override public void onEndOfSpeech() { }
-    @Override public void onError(int error) { service.restartListening(); }
+    @Override public void onEndOfSpeech() { service.onRecognizerSpeechEnded(); }
+    @Override public void onError(int error) { service.onRecognizerError(error); }
     @Override public void onEvent(int eventType, Bundle params) { }
     @Override public void onPartialResults(Bundle partialResults) { }
 
     @Override
     public void onResults(Bundle results) {
+        ArrayList<String> matches = null;
         if (results != null) {
-            ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-            if (matches != null && !matches.isEmpty()) service.handleCommand(matches.get(0));
+            matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         }
-        service.restartListening();
+        service.onRecognizerResults(matches);
     }
 }

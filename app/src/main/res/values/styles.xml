@@ -8,7 +8,7 @@
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:statusBarColor">@color/bg_dark</item>
         <item name="android:navigationBarColor">@color/bg_dark</item>
-        <item name="android:windowBackground">@color/bg_dark</item>
-        <item name="android:colorAccent">@color/accent_red_hot</item>
+        <item name="android:windowBackground">@color/bg_canvas</item>
+        <item name="android:colorAccent">@color/accent_green_hot</item>
     </style>
 </resources>

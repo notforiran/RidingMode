@@ -43,6 +43,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     public static final String ACTION_START = "com.ridingmode.app.action.START";
     public static final String ACTION_STOP = "com.ridingmode.app.action.STOP";
     public static final String ACTION_READ_NOTIFICATION = "com.ridingmode.app.action.READ_NOTIF";
+    public static final String ACTION_VOICE_COMMAND = "com.ridingmode.app.action.VOICE_COMMAND";
 
     private static final int NOTIF_ID = 12345;
     private static final String CHANNEL_ID = "riding_mode_channel";
@@ -50,6 +51,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     public static boolean isRiding = false;
     private static RidingForegroundService activeInstance;
+    private static boolean activityVoiceActive;
 
     private AudioManager audioManager;
     private SpeechRecognizer speechRecognizer;
@@ -64,6 +66,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private boolean stopAfterCurrentSpeech;
     private boolean speechOutputActive;
     private boolean foregroundPromoted;
+    private boolean serviceListening;
+    private int recognitionErrorCount;
     private long utteranceCounter;
     private int currentCallState = TelephonyManager.CALL_STATE_IDLE;
 
@@ -85,7 +89,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : intent.getAction();
         if (ACTION_STOP.equals(action)) {
-            stopRidingModeWithSpeech("Riding mode off");
+            stopRidingModeWithSpeech("Ride mode off");
             return START_NOT_STICKY;
         }
         if (ACTION_READ_NOTIFICATION.equals(action)) {
@@ -93,6 +97,11 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             if (text != null && isRiding && UserPreferences.areNotificationsEnabled(this) && !UserPreferences.isMuted(this)) {
                 speakNotification(text);
             }
+            return START_STICKY;
+        }
+        if (ACTION_VOICE_COMMAND.equals(action)) {
+            String voiceCommand = intent == null ? null : intent.getStringExtra("command");
+            deliverVoiceCommand(voiceCommand);
             return START_STICKY;
         }
         startForegroundMode();
@@ -112,6 +121,28 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
     }
 
+    public static void deliverVoiceCommand(String command) {
+        RidingForegroundService service = activeInstance;
+        if (service == null || command == null || command.trim().length() == 0 || !isRiding) return;
+        Handler handler = service.mainHandler;
+        if (handler != null) {
+            handler.post(() -> service.handleCommand(command));
+        } else {
+            service.handleCommand(command);
+        }
+    }
+
+    public static void setActivityVoiceActive(boolean active) {
+        activityVoiceActive = active;
+        RidingForegroundService service = activeInstance;
+        if (service == null || !isRiding) return;
+        if (active) {
+            service.stopListening();
+        } else {
+            service.restartListening();
+        }
+    }
+
     private void startForegroundMode() {
         createNotificationChannel();
         Notification notification = buildNotification();
@@ -125,11 +156,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             return;
         }
         isRiding = true;
+        recognitionErrorCount = 0;
         enableBluetoothSco();
         registerPhoneListener();
         initSpeechRecognizer();
         startListening();
-        if (!UserPreferences.isMuted(this)) speakSystem("Riding mode active");
+        if (!UserPreferences.isMuted(this)) speakSystem("Ride mode active");
     }
 
     private boolean promoteToForegroundSafely(Notification notification) {
@@ -165,6 +197,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private void shutdownRidingMode(boolean destroySpeech) {
         isRiding = false;
         foregroundPromoted = false;
+        serviceListening = false;
         speechOutputActive = false;
         clearPendingContactChoice();
         clearPendingCallRequest();
@@ -224,41 +257,134 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speakSystem("Speech recognition is not available");
             return;
         }
-        if (speechRecognizer != null) {
-            try { speechRecognizer.destroy(); } catch (Exception ignored) { }
+        try {
+            if (speechRecognizer != null) {
+                try { speechRecognizer.destroy(); } catch (Exception ignored) { }
+            }
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
+            speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+            speechRecognizer.setRecognitionListener(new RiderRecognitionListener(this));
+            serviceListening = false;
+            recognitionErrorCount = 0;
+        } catch (Exception e) {
+            speechRecognizer = null;
+            speechIntent = null;
+            serviceListening = false;
+            speakSystem("Voice recognizer failed to start");
         }
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
-        speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
-        speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
-        speechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
-        speechRecognizer.setRecognitionListener(new RiderRecognitionListener(this));
     }
 
     public void restartListening() {
+        scheduleListeningRestart(700L);
+    }
+
+    private void scheduleListeningRestart(long delayMs) {
         if (!isRiding || mainHandler == null || stopAfterCurrentSpeech || speechOutputActive) return;
         if (restartRunnable != null) mainHandler.removeCallbacks(restartRunnable);
         restartRunnable = this::startListening;
-        mainHandler.postDelayed(restartRunnable, 650);
+        mainHandler.postDelayed(restartRunnable, Math.max(250L, delayMs));
     }
 
     private void startListening() {
-        if (!isRiding || speechRecognizer == null || speechIntent == null || stopAfterCurrentSpeech || speechOutputActive) return;
+        if (!isRiding || activityVoiceActive || stopAfterCurrentSpeech || speechOutputActive) return;
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) return;
+        if (speechRecognizer == null || speechIntent == null) initSpeechRecognizer();
+        if (speechRecognizer == null || speechIntent == null || serviceListening) return;
         try {
-            speechRecognizer.cancel();
+            serviceListening = true;
             speechRecognizer.startListening(speechIntent);
-        } catch (Exception ignored) { }
+        } catch (Exception e) {
+            serviceListening = false;
+            recognitionErrorCount++;
+            if (recognitionErrorCount >= 3) {
+                initSpeechRecognizer();
+                recognitionErrorCount = 0;
+            }
+            scheduleListeningRestart(1200L);
+        }
     }
 
     private void stopListening() {
         if (mainHandler != null && restartRunnable != null) mainHandler.removeCallbacks(restartRunnable);
+        serviceListening = false;
         if (speechRecognizer != null) {
             try {
-                speechRecognizer.stopListening();
                 speechRecognizer.cancel();
             } catch (Exception ignored) { }
         }
+    }
+
+    public void onRecognizerReady() {
+        serviceListening = true;
+        recognitionErrorCount = 0;
+    }
+
+    public void onRecognizerSpeechStarted() {
+        serviceListening = true;
+    }
+
+    public void onRecognizerSpeechEnded() {
+        serviceListening = false;
+    }
+
+    public void onRecognizerResults(ArrayList<String> matches) {
+        serviceListening = false;
+        recognitionErrorCount = 0;
+        if (matches != null && !matches.isEmpty()) {
+            for (String match : matches) {
+                if (match == null) continue;
+                if (looksLikeKnownCommand(match)) {
+                    handleCommand(match);
+                    restartListening();
+                    return;
+                }
+            }
+            handleCommand(matches.get(0));
+        }
+        restartListening();
+    }
+
+    public void onRecognizerError(int error) {
+        serviceListening = false;
+        if (!isRiding || stopAfterCurrentSpeech || speechOutputActive) return;
+        recognitionErrorCount++;
+        if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || recognitionErrorCount >= 5) {
+            initSpeechRecognizer();
+            recognitionErrorCount = 0;
+        }
+        long delay = (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) ? 450L : 1100L;
+        scheduleListeningRestart(delay);
+    }
+
+    private boolean looksLikeKnownCommand(String rawCommand) {
+        String command = normalizeCommand(rawCommand);
+        if (command.length() == 0) return false;
+        if (command.startsWith("call ")) return true;
+        return isRideOffCommand(command)
+                || isCancelCommand(command)
+                || isEndCallCommand(command)
+                || isMusicPlayCommand(command)
+                || isMusicPauseCommand(command)
+                || isMusicNextCommand(command)
+                || isMusicPreviousCommand(command)
+                || isVolumeMaxCommand(command)
+                || isVolumeUpCommand(command)
+                || isVolumeDownCommand(command)
+                || isMuteOnCommand(command)
+                || isMuteOffCommand(command)
+                || isNotificationOffCommand(command)
+                || isNotificationOnCommand(command)
+                || parseSelection(command) != null
+                || parseSimSelection(command) != null
+                || command.equals("answer")
+                || command.equals("accept");
     }
 
     public void handleCommand(String rawCommand) {
@@ -302,7 +428,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
 
         if (isRideOffCommand(command)) {
-            stopRidingModeWithSpeech("Riding mode off");
+            stopRidingModeWithSpeech("Ride mode off");
             return;
         }
 
@@ -711,8 +837,6 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             try {
                 SubscriptionManager subscriptionManager = getSystemService(SubscriptionManager.class);
                 if (subscriptionManager != null && hasPermission(Manifest.permission.READ_PHONE_STATE) && subscriptionManager.getActiveSubscriptionInfoList() != null) {
-                    // Keep empty result; the presence of active subscriptions is used only to avoid a false single-SIM assumption.
-                    // The actual call routing needs phone account handles, so we do not synthesize fake handles here.
                 }
             } catch (Exception ignored) { }
         }
@@ -750,13 +874,19 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speakSystem("Answer call permission missing");
             return;
         }
+        boolean attempted = false;
         try {
             TelecomManager tm = (TelecomManager) getSystemService(TELECOM_SERVICE);
-            if (tm != null) tm.acceptRingingCall();
-            speakSystem("Answering");
-        } catch (Exception e) {
-            speakSystem("Answer failed");
-        }
+            if (tm != null) {
+                tm.acceptRingingCall();
+                attempted = true;
+            }
+        } catch (Exception ignored) { }
+        try {
+            dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
+            attempted = true;
+        } catch (Exception ignored) { }
+        speakSystem(attempted ? "Answering" : "Answer failed");
     }
 
     private void endCall() {
@@ -768,13 +898,19 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speakSystem("Call control permission missing");
             return;
         }
+        boolean attempted = false;
         try {
             TelecomManager tm = (TelecomManager) getSystemService(TELECOM_SERVICE);
-            if (tm != null) tm.endCall();
-            speakSystem("Ending call");
-        } catch (Exception e) {
-            speakSystem("End call failed");
-        }
+            if (tm != null) {
+                tm.endCall();
+                attempted = true;
+            }
+        } catch (Exception ignored) { }
+        try {
+            dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
+            attempted = true;
+        } catch (Exception ignored) { }
+        speakSystem(attempted ? "Ending call" : "End call failed");
     }
 
     private void controlMusic(int keyCode, String confirmation, boolean speakConfirmation) {
@@ -904,6 +1040,11 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             int result = tts.speak(text, flush ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, params, utteranceId);
             if (result == TextToSpeech.ERROR) {
                 onSpeechFinished();
+            } else if (mainHandler != null) {
+                long watchdogMs = Math.max(1800L, Math.min(7000L, text.length() * 75L + 1200L));
+                mainHandler.postDelayed(() -> {
+                    if (speechOutputActive) onSpeechFinished();
+                }, watchdogMs);
             }
         } catch (Exception ignored) {
             onSpeechFinished();
@@ -958,7 +1099,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager == null) return;
-        NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Riding Mode", NotificationManager.IMPORTANCE_LOW);
+        NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Ride mode", NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("Keeps voice riding mode active");
         manager.createNotificationChannel(channel);
     }
@@ -983,7 +1124,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
         return builder
-                .setContentTitle("Riding Mode")
+                .setContentTitle("Ride mode")
                 .setContentText("Listening for music, call, sim, mute, notification, and ride off commands")
                 .setSmallIcon(R.drawable.ic_stat_riding)
                 .setContentIntent(contentPendingIntent)
