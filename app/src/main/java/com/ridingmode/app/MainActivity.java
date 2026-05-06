@@ -11,9 +11,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.speech.RecognitionListener;
-import android.speech.RecognizerIntent;
-import android.speech.SpeechRecognizer;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -45,10 +42,6 @@ public class MainActivity extends Activity {
     private LinearLayout contactsListContainer;
     private TextView commandsText;
     private MediaPlayer mediaPlayer;
-    private SpeechRecognizer activitySpeechRecognizer;
-    private Intent activitySpeechIntent;
-    private boolean activityListening;
-    private Runnable activityRestartRunnable;
     private Runnable engineStopRunnable;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private String[] requestedPermissions;
@@ -119,12 +112,6 @@ public class MainActivity extends Activity {
         applyApprovedFullScreenDesign();
         syncUiWithService();
         refreshContactList();
-        if (RidingForegroundService.isRiding && hasCriticalPermissions()) {
-            // V21: keep voice recognition centralized in the foreground service.
-            // The previous Activity-level recognizer could fail silently and leave
-            // activityVoiceActive=true, which disabled the service recognizer.
-            RidingForegroundService.setActivityVoiceActive(false);
-        }
         if (pendingStartAfterNotificationSettings) {
             pendingStartAfterNotificationSettings = false;
             if (hasCriticalPermissions()) {
@@ -139,8 +126,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        // V21: do not stop the service voice loop when the Activity pauses.
-        RidingForegroundService.setActivityVoiceActive(false);
     }
 
     private String[] buildRequestedPermissions() {
@@ -150,7 +135,6 @@ public class MainActivity extends Activity {
         permissions.add(Manifest.permission.READ_CONTACTS);
         permissions.add(Manifest.permission.READ_PHONE_STATE);
         if (Build.VERSION.SDK_INT >= 26) permissions.add(Manifest.permission.ANSWER_PHONE_CALLS);
-        if (Build.VERSION.SDK_INT >= 31) permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
         if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS);
         return permissions.toArray(new String[0]);
     }
@@ -190,7 +174,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (!hasAllRuntimePermissions()) {
-            Toast.makeText(this, "Some optional permissions were denied. Calls, Bluetooth or notifications may be limited.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Some optional permissions were denied. Calls or notifications may be limited.", Toast.LENGTH_LONG).show();
         }
         if (!isNotificationServiceEnabled()) {
             pendingStartAfterNotificationSettings = true;
@@ -227,8 +211,6 @@ public class MainActivity extends Activity {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
             else startService(intent);
-            // V21: service recognizer is the single source of truth.
-            RidingForegroundService.setActivityVoiceActive(false);
             playEngineSound();
         } catch (Exception e) {
             setEngineOnVisuals(false);
@@ -238,7 +220,6 @@ public class MainActivity extends Activity {
 
     private void stopRidingMode() {
         setEngineOnVisuals(false);
-        RidingForegroundService.setActivityVoiceActive(false);
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_STOP);
         try {
@@ -387,157 +368,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void initActivityVoiceRecognizer() {
-        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return;
-        if (activitySpeechRecognizer != null && activitySpeechIntent != null) return;
-        try {
-            activitySpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            activitySpeechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L);
-            activitySpeechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
-            activitySpeechRecognizer.setRecognitionListener(new RecognitionListener() {
-                @Override public void onReadyForSpeech(Bundle params) { activityListening = true; }
-                @Override public void onBeginningOfSpeech() { activityListening = true; }
-                @Override public void onRmsChanged(float rmsdB) { }
-                @Override public void onBufferReceived(byte[] buffer) { }
-                @Override public void onEndOfSpeech() { activityListening = false; }
-                @Override public void onPartialResults(Bundle partialResults) { }
-                @Override public void onEvent(int eventType, Bundle params) { }
-
-                @Override
-                public void onError(int error) {
-                    activityListening = false;
-                    if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                        rebuildActivityVoiceRecognizer();
-                        scheduleActivityVoiceRestart(1200L);
-                    } else {
-                        scheduleActivityVoiceRestart(error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ? 450L : 900L);
-                    }
-                }
-
-                @Override
-                public void onResults(Bundle results) {
-                    activityListening = false;
-                    ArrayList<String> matches = results == null ? null : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if (matches != null && !matches.isEmpty()) {
-                        for (String match : matches) {
-                            if (match == null) continue;
-                            String normalized = normalizeActivityCommand(match);
-                            if (looksLikeActivityCommand(normalized)) {
-                                RidingForegroundService.deliverVoiceCommand(match);
-                                scheduleActivityVoiceRestart(700L);
-                                return;
-                            }
-                        }
-                        RidingForegroundService.deliverVoiceCommand(matches.get(0));
-                    }
-                    scheduleActivityVoiceRestart(700L);
-                }
-            });
-        } catch (Exception ignored) {
-            activitySpeechRecognizer = null;
-            activitySpeechIntent = null;
-            activityListening = false;
-        }
-    }
-
-    private void rebuildActivityVoiceRecognizer() {
-        try {
-            if (activitySpeechRecognizer != null) activitySpeechRecognizer.destroy();
-        } catch (Exception ignored) { }
-        activitySpeechRecognizer = null;
-        activitySpeechIntent = null;
-        activityListening = false;
-        initActivityVoiceRecognizer();
-    }
-
-    private void scheduleActivityVoiceRestart(long delayMs) {
-        if (!RidingForegroundService.isRiding || uiHandler == null) return;
-        if (activityRestartRunnable != null) uiHandler.removeCallbacks(activityRestartRunnable);
-        activityRestartRunnable = this::startActivityVoiceRecognition;
-        uiHandler.postDelayed(activityRestartRunnable, Math.max(250L, delayMs));
-    }
-
-    private void startActivityVoiceRecognition() {
-        if (!RidingForegroundService.isRiding || activityListening) return;
-        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
-        initActivityVoiceRecognizer();
-        if (activitySpeechRecognizer == null || activitySpeechIntent == null) return;
-        try {
-            RidingForegroundService.setActivityVoiceActive(true);
-            activityListening = true;
-            activitySpeechRecognizer.startListening(activitySpeechIntent);
-        } catch (Exception e) {
-            activityListening = false;
-            rebuildActivityVoiceRecognizer();
-            scheduleActivityVoiceRestart(1200L);
-        }
-    }
-
-    private void stopActivityVoiceRecognition() {
-        if (uiHandler != null && activityRestartRunnable != null) uiHandler.removeCallbacks(activityRestartRunnable);
-        activityListening = false;
-        if (activitySpeechRecognizer != null) {
-            try { activitySpeechRecognizer.cancel(); } catch (Exception ignored) { }
-        }
-    }
-
-    private void destroyActivityVoiceRecognizer() {
-        stopActivityVoiceRecognition();
-        if (activitySpeechRecognizer != null) {
-            try { activitySpeechRecognizer.destroy(); } catch (Exception ignored) { }
-        }
-        activitySpeechRecognizer = null;
-        activitySpeechIntent = null;
-    }
-
-    private String normalizeActivityCommand(String raw) {
-        if (raw == null) return "";
-        return raw.toLowerCase(Locale.US).replaceAll("[^a-z0-9+ ]", " ").replaceAll("\\s+", " ").trim();
-    }
-
-    private boolean looksLikeActivityCommand(String command) {
-        if (command.length() == 0) return false;
-        if (command.startsWith("call ")) return true;
-        return command.equals("play")
-                || command.contains("play music")
-                || command.contains("play song")
-                || command.contains("pause")
-                || command.contains("next")
-                || command.contains("previous")
-                || command.contains("pre song")
-                || command.contains("pre music")
-                || command.contains("pre track")
-                || command.contains("volume")
-                || command.contains("ride off")
-                || command.contains("right off")
-                || command.contains("engine off")
-                || command.contains("motor off")
-                || command.contains("notif")
-                || command.contains("notification")
-                || command.equals("mute on")
-                || command.equals("mute off")
-                || command.equals("answer")
-                || command.equals("accept")
-                || command.equals("finish call")
-                || command.equals("end call")
-                || command.equals("hang up")
-                || command.equals("first")
-                || command.equals("second")
-                || command.equals("first one")
-                || command.equals("second one")
-                || command.contains("sim one")
-                || command.contains("sim two")
-                || command.contains("find more")
-                || command.equals("cancel");
-    }
-
     private String buildCommandsPreview() {
         return "Ride off\n"
                 + "Play music\n"
@@ -578,8 +408,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        destroyActivityVoiceRecognizer();
-        RidingForegroundService.setActivityVoiceActive(false);
         if (engineStopRunnable != null) {
             uiHandler.removeCallbacks(engineStopRunnable);
             engineStopRunnable = null;

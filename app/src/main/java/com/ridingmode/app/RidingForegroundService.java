@@ -10,8 +10,6 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.media.AudioAttributes;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.session.MediaController;
 import android.net.Uri;
@@ -42,16 +40,15 @@ import java.util.Locale;
 public class RidingForegroundService extends Service implements TextToSpeech.OnInitListener {
     public static final String ACTION_START = "com.ridingmode.app.action.START";
     public static final String ACTION_STOP = "com.ridingmode.app.action.STOP";
-    public static final String ACTION_READ_NOTIFICATION = "com.ridingmode.app.action.READ_NOTIF";
-    public static final String ACTION_VOICE_COMMAND = "com.ridingmode.app.action.VOICE_COMMAND";
 
     private static final int NOTIF_ID = 12345;
     private static final String CHANNEL_ID = "riding_mode_channel";
     private static final int CONTACT_PAGE_SIZE = 2;
+    private static final long RECOGNITION_SYSTEM_SILENCE_MS = 900L;
+    private static final long NOISE_RESTART_DELAY_MS = 1700L;
 
     public static boolean isRiding = false;
     private static RidingForegroundService activeInstance;
-    private static boolean activityVoiceActive;
 
     private AudioManager audioManager;
     private SpeechRecognizer speechRecognizer;
@@ -63,7 +60,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private Runnable voiceWatchdogRunnable;
     private TelephonyManager telephonyManager;
     private PhoneStateListener phoneStateListener;
-    private AudioFocusRequest activeFocusRequest;
+    private boolean mediaDuckingActive;
+    private int originalMusicVolume = -1;
+    private int originalSystemVolume = -1;
+    private int originalNotificationVolume = -1;
+    private boolean systemPromptSilenced;
+    private boolean mediaWasPlayingBeforeListen;
     private boolean stopAfterCurrentSpeech;
     private boolean speechOutputActive;
     private boolean foregroundPromoted;
@@ -71,6 +73,9 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private int recognitionErrorCount;
     private long utteranceCounter;
     private int currentCallState = TelephonyManager.CALL_STATE_IDLE;
+    private String lastHandledCommand = "";
+    private long lastHandledCommandAt;
+    private long suppressListeningUntilMillis;
 
     private List<ContactMatch> pendingContactMatches;
     private int pendingContactPage;
@@ -93,18 +98,6 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             stopRidingModeWithSpeech("Ride mode off");
             return START_NOT_STICKY;
         }
-        if (ACTION_READ_NOTIFICATION.equals(action)) {
-            String text = intent == null ? null : intent.getStringExtra("text");
-            if (text != null && isRiding && UserPreferences.areNotificationsEnabled(this) && !UserPreferences.isMuted(this)) {
-                speakNotification(text);
-            }
-            return START_STICKY;
-        }
-        if (ACTION_VOICE_COMMAND.equals(action)) {
-            String voiceCommand = intent == null ? null : intent.getStringExtra("command");
-            deliverVoiceCommand(voiceCommand);
-            return START_STICKY;
-        }
         startForegroundMode();
         return START_STICKY;
     }
@@ -122,27 +115,6 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
     }
 
-    public static void deliverVoiceCommand(String command) {
-        RidingForegroundService service = activeInstance;
-        if (service == null || command == null || command.trim().length() == 0 || !isRiding) return;
-        Handler handler = service.mainHandler;
-        if (handler != null) {
-            handler.post(() -> service.handleCommand(command));
-        } else {
-            service.handleCommand(command);
-        }
-    }
-
-    public static void setActivityVoiceActive(boolean active) {
-        // V21: Activity-level recognition is disabled. Keep this method as a
-        // compatibility hook, but never let the Activity permanently suppress
-        // the foreground service recognizer.
-        activityVoiceActive = false;
-        RidingForegroundService service = activeInstance;
-        if (service == null || !isRiding) return;
-        service.restartListening();
-    }
-
     private void startForegroundMode() {
         createNotificationChannel();
         Notification notification = buildNotification();
@@ -153,17 +125,18 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
         if (isRiding) {
             startVoiceWatchdog();
-            startListening();
+            scheduleListeningRestart(500L);
             return;
         }
         isRiding = true;
         recognitionErrorCount = 0;
-        enableBluetoothSco();
+        // Microphone ownership is centralized here: the foreground service is
+        // the only component that creates and owns SpeechRecognizer.
         registerPhoneListener();
         initSpeechRecognizer();
-        startListening();
         startVoiceWatchdog();
-        if (!UserPreferences.isMuted(this)) speakSystem("Ride mode active");
+        suppressListeningUntilMillis = System.currentTimeMillis() + 1800L;
+        scheduleListeningRestart(1800L);
     }
 
     private boolean promoteToForegroundSafely(Notification notification) {
@@ -201,13 +174,15 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         foregroundPromoted = false;
         serviceListening = false;
         speechOutputActive = false;
+        lastHandledCommand = "";
+        lastHandledCommandAt = 0L;
+        suppressListeningUntilMillis = 0L;
         clearPendingContactChoice();
         clearPendingCallRequest();
         stopVoiceWatchdog();
         stopListening();
         unregisterPhoneListener();
-        disableBluetoothSco();
-        abandonSpeechAudioFocus();
+        restoreManualAudioState();
         if (destroySpeech && speechRecognizer != null) {
             try { speechRecognizer.destroy(); } catch (Exception ignored) { }
             speechRecognizer = null;
@@ -275,6 +250,11 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
             speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L);
             speechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+            // Best-effort vendor-specific flags. Some recognizers ignore these,
+            // but they reduce audible prompt/beep behavior on several devices.
+            speechIntent.putExtra("android.speech.extra.SUPPRESS_BEEP", true);
+            speechIntent.putExtra("android.speech.extra.NO_BEEP", true);
+            speechIntent.putExtra("android.speech.extra.DICTATION_MODE", true);
             speechRecognizer.setRecognitionListener(new RiderRecognitionListener(this));
             serviceListening = false;
             recognitionErrorCount = 0;
@@ -322,16 +302,20 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private void startListening() {
-        // V21: the service must keep listening even while the main screen is open.
-        // Do not gate this on Activity state; that was the main reason V20
-        // could appear deaf when the Activity recognizer failed silently.
-        activityVoiceActive = false;
+        // Single microphone owner: never gate listening on Activity state.
         if (!isRiding || stopAfterCurrentSpeech || speechOutputActive) return;
+        long nowForListen = System.currentTimeMillis();
+        if (nowForListen < suppressListeningUntilMillis) {
+            scheduleListeningRestart(Math.max(250L, suppressListeningUntilMillis - nowForListen));
+            return;
+        }
         if (!hasPermission(Manifest.permission.RECORD_AUDIO)) return;
         if (speechRecognizer == null || speechIntent == null) initSpeechRecognizer();
         if (speechRecognizer == null || speechIntent == null || serviceListening) return;
         try {
             serviceListening = true;
+            mediaWasPlayingBeforeListen = isMusicPlaying();
+            silenceRecognitionSystemPrompt();
             speechRecognizer.startListening(speechIntent);
         } catch (Exception e) {
             serviceListening = false;
@@ -347,6 +331,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private void stopListening() {
         if (mainHandler != null && restartRunnable != null) mainHandler.removeCallbacks(restartRunnable);
         serviceListening = false;
+        restoreRecognitionSystemPrompt();
         if (speechRecognizer != null) {
             try {
                 speechRecognizer.cancel();
@@ -357,18 +342,25 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     public void onRecognizerReady() {
         serviceListening = true;
         recognitionErrorCount = 0;
+        scheduleRecognitionSystemPromptRestore();
     }
 
     public void onRecognizerSpeechStarted() {
         serviceListening = true;
+        scheduleRecognitionSystemPromptRestore();
+        restoreMediaPlaybackIfRecognitionPausedIt();
     }
 
     public void onRecognizerSpeechEnded() {
         serviceListening = false;
+        restoreRecognitionSystemPrompt();
+        restoreMediaPlaybackIfRecognitionPausedIt();
     }
 
     public void onRecognizerResults(ArrayList<String> matches) {
         serviceListening = false;
+        restoreRecognitionSystemPrompt();
+        restoreMediaPlaybackIfRecognitionPausedIt();
         recognitionErrorCount = 0;
         if (matches != null && !matches.isEmpty()) {
             for (String match : matches) {
@@ -379,22 +371,23 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                     return;
                 }
             }
-            // V21: use the most likely phrase as a fallback instead of dropping
-            // non-exact recognizer output.
-            handleCommand(matches.get(0));
+            // In a motorcycle/noisy environment, never execute unknown recognizer text.
+            // Only known commands are handled; random traffic/noise must be ignored.
         }
         restartListening();
     }
 
     public void onRecognizerError(int error) {
         serviceListening = false;
+        restoreRecognitionSystemPrompt();
+        restoreMediaPlaybackIfRecognitionPausedIt();
         if (!isRiding || stopAfterCurrentSpeech || speechOutputActive) return;
         recognitionErrorCount++;
         if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || recognitionErrorCount >= 5) {
             initSpeechRecognizer();
             recognitionErrorCount = 0;
         }
-        long delay = (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) ? 450L : 1100L;
+        long delay = (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) ? NOISE_RESTART_DELAY_MS : 1400L;
         scheduleListeningRestart(delay);
     }
 
@@ -422,10 +415,80 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 || command.equals("accept");
     }
 
+    private void silenceRecognitionSystemPrompt() {
+        if (audioManager == null || systemPromptSilenced) return;
+        try {
+            originalSystemVolume = audioManager.getStreamVolume(AudioManager.STREAM_SYSTEM);
+            originalNotificationVolume = audioManager.getStreamVolume(AudioManager.STREAM_NOTIFICATION);
+            audioManager.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            systemPromptSilenced = true;
+            scheduleRecognitionSystemPromptRestore();
+        } catch (Exception ignored) {
+            systemPromptSilenced = false;
+        }
+    }
+
+    private void scheduleRecognitionSystemPromptRestore() {
+        if (mainHandler == null) return;
+        mainHandler.postDelayed(this::restoreRecognitionSystemPrompt, RECOGNITION_SYSTEM_SILENCE_MS);
+    }
+
+    private void restoreRecognitionSystemPrompt() {
+        if (audioManager == null || !systemPromptSilenced) return;
+        try {
+            if (originalSystemVolume >= 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_SYSTEM, originalSystemVolume, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            }
+            if (originalNotificationVolume >= 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, originalNotificationVolume, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            }
+        } catch (Exception ignored) { }
+        systemPromptSilenced = false;
+        originalSystemVolume = -1;
+        originalNotificationVolume = -1;
+    }
+
+    private boolean isMusicPlaying() {
+        try {
+            MediaController controller = MyNotificationListener.getActiveController();
+            if (controller != null && controller.getPlaybackState() != null) {
+                int state = controller.getPlaybackState().getState();
+                return state == android.media.session.PlaybackState.STATE_PLAYING
+                        || state == android.media.session.PlaybackState.STATE_BUFFERING
+                        || state == android.media.session.PlaybackState.STATE_FAST_FORWARDING
+                        || state == android.media.session.PlaybackState.STATE_REWINDING;
+            }
+        } catch (Exception ignored) { }
+        try {
+            return audioManager != null && audioManager.isMusicActive();
+        } catch (Exception ignored) { }
+        return false;
+    }
+
+    private void restoreMediaPlaybackIfRecognitionPausedIt() {
+        if (!mediaWasPlayingBeforeListen) return;
+        if (mainHandler == null) return;
+        mainHandler.postDelayed(() -> {
+            if (!isRiding || UserPreferences.isMuted(RidingForegroundService.this)) return;
+            if (!mediaWasPlayingBeforeListen || isMusicPlaying()) return;
+            try {
+                MediaController controller = MyNotificationListener.getActiveController();
+                if (controller != null && controller.getTransportControls() != null) {
+                    controller.getTransportControls().play();
+                    return;
+                }
+            } catch (Exception ignored) { }
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
+        }, 350L);
+    }
+
     public void handleCommand(String rawCommand) {
         if (rawCommand == null) return;
         String command = normalizeCommand(rawCommand);
-        if (command.length() == 0) return;
+        if (command.length() == 0 || isSelfEchoCommand(command)) return;
+        if (isDebouncedCommand(command)) return;
+        rememberHandledCommand(command);
 
         if (currentCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
             if (isEndCallCommand(command)) endCall();
@@ -479,13 +542,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (command.startsWith("call ")) {
             callContact(command.substring(5).trim());
         } else if (isMusicPlayCommand(command)) {
-            controlMusic(KeyEvent.KEYCODE_MEDIA_PLAY, "Playing music", true);
+            controlMusic(KeyEvent.KEYCODE_MEDIA_PLAY, "", false);
         } else if (isMusicPauseCommand(command)) {
-            controlMusic(KeyEvent.KEYCODE_MEDIA_PAUSE, "Music paused", true);
+            controlMusic(KeyEvent.KEYCODE_MEDIA_PAUSE, "", false);
         } else if (isMusicNextCommand(command)) {
-            controlMusic(KeyEvent.KEYCODE_MEDIA_NEXT, "Next track", true);
+            controlMusic(KeyEvent.KEYCODE_MEDIA_NEXT, "", false);
         } else if (isMusicPreviousCommand(command)) {
-            controlMusic(KeyEvent.KEYCODE_MEDIA_PREVIOUS, "Previous track", true);
+            controlMusic(KeyEvent.KEYCODE_MEDIA_PREVIOUS, "", false);
         } else if (isVolumeMaxCommand(command)) {
             setMusicVolumeToMax();
         } else if (isVolumeUpCommand(command)) {
@@ -495,34 +558,96 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
     }
 
+    private boolean isSelfEchoCommand(String command) {
+        return command.equals("ride mode active")
+                || command.equals("voice ready")
+                || command.equals("playing music")
+                || command.equals("music paused")
+                || command.equals("next track")
+                || command.equals("previous track")
+                || command.equals("volume up") && lastHandledCommand.equals("volume up")
+                || command.equals("volume down") && lastHandledCommand.equals("volume down")
+                || command.equals("volume max") && lastHandledCommand.equals("volume max");
+    }
+
+    private boolean isDebouncedCommand(String command) {
+        long now = System.currentTimeMillis();
+        long windowMs = isMediaOrVolumeCommand(command) ? 2500L : 1200L;
+        return command.equals(lastHandledCommand) && now - lastHandledCommandAt < windowMs;
+    }
+
+    private void rememberHandledCommand(String command) {
+        lastHandledCommand = command;
+        lastHandledCommandAt = System.currentTimeMillis();
+    }
+
+    private boolean isMediaOrVolumeCommand(String command) {
+        return isMusicPlayCommand(command)
+                || isMusicPauseCommand(command)
+                || isMusicNextCommand(command)
+                || isMusicPreviousCommand(command)
+                || isVolumeMaxCommand(command)
+                || isVolumeUpCommand(command)
+                || isVolumeDownCommand(command);
+    }
+
     private String normalizeCommand(String raw) {
         String command = raw.toLowerCase(Locale.US).trim();
         command = command.replaceAll("[^a-z0-9+ ]", " ").replaceAll("\\s+", " ").trim();
         command = command.replace("right off", "ride off");
+        command = command.replace("right of", "ride off");
         command = command.replace("ride of", "ride off");
         command = command.replace("rider off", "ride off");
+        command = command.replace("rider of", "ride off");
         command = command.replace("riding off", "ride off");
+        command = command.replace("riding of", "ride off");
+        command = command.replace("rideof", "ride off");
+        command = command.replace("rightof", "ride off");
         command = command.replace("notification on on", "notification on");
         command = command.replace("reed off", "ride off");
+        command = command.replace("read off", "ride off");
         command = command.replace("write off", "ride off");
+        command = command.replace("write of", "ride off");
         command = command.replace("night off", "ride off");
+        command = command.replace("bike off", "ride off");
         command = command.replace("play songs", "play song");
+        command = command.replace("play the music", "play music");
+        command = command.replace("play my music", "play music");
+        command = command.replace("resume song", "play song");
+        command = command.replace("resume music", "play music");
+        command = command.replace("start music", "play music");
+        command = command.replace("start song", "play song");
         command = command.replace("next songs", "next song");
+        command = command.replace("next music", "next song");
         command = command.replace("free song", "pre song");
         command = command.replace("pre-song", "pre song");
+        command = command.replace("prev song", "pre song");
+        command = command.replace("prev music", "pre music");
+        command = command.replace("prev track", "pre track");
+        command = command.replace("notification of", "notification off");
+        command = command.replace("notifications off", "notification off");
+        command = command.replace("notifications on", "notification on");
+        command = command.replace("notify off", "notif off");
+        command = command.replace("notify on", "notif on");
+        command = command.replaceAll("\\b(please|hey|ok|okay|now)\\b", " ").replaceAll("\\s+", " ").trim();
         return command;
     }
 
     private boolean isRideOffCommand(String command) {
         return command.equals("ride off")
+                || command.contains(" ride off")
+                || command.contains("ride off ")
                 || command.equals("motor off")
                 || command.equals("engine off")
                 || command.equals("stop riding")
                 || command.equals("stop riding mode")
                 || command.equals("turn off riding mode")
+                || command.equals("turn off ride mode")
                 || command.equals("turn off engine")
                 || command.equals("shutdown riding mode")
-                || command.equals("shut down riding mode");
+                || command.equals("shut down riding mode")
+                || command.equals("shut off ride mode")
+                || command.equals("bike off");
     }
 
     private boolean isCancelCommand(String command) {
@@ -539,35 +664,67 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private boolean isMusicPlayCommand(String command) {
-        return command.equals("play")
-                || (command.contains("play") && (command.contains("music") || command.contains("song")));
+        return command.equals("play music")
+                || command.equals("play song")
+                || command.equals("play track")
+                || command.equals("resume music")
+                || command.equals("resume song")
+                || command.equals("start music")
+                || command.equals("start song");
     }
 
     private boolean isMusicPauseCommand(String command) {
-        return command.contains("pause") || command.equals("stop music");
+        return command.equals("pause")
+                || command.equals("pause music")
+                || command.equals("pause song")
+                || command.equals("stop music")
+                || command.equals("stop song");
     }
 
     private boolean isMusicNextCommand(String command) {
-        return command.equals("next") || command.contains("next song") || command.contains("next track");
+        return command.equals("next")
+                || command.equals("next song")
+                || command.equals("next track")
+                || command.equals("next music");
     }
 
     private boolean isMusicPreviousCommand(String command) {
-        return command.contains("previous")
-                || command.contains("pre song")
-                || command.contains("pre music")
-                || command.contains("pre track");
+        return command.equals("previous")
+                || command.equals("previous song")
+                || command.equals("previous track")
+                || command.equals("previous music")
+                || command.equals("pre song")
+                || command.equals("pre music")
+                || command.equals("pre track")
+                || command.equals("prev song")
+                || command.equals("prev music")
+                || command.equals("prev track");
     }
 
     private boolean isVolumeUpCommand(String command) {
-        return command.equals("volume up") || command.equals("increase volume") || command.equals("sound up");
+        return command.equals("volume up")
+                || command.equals("increase volume")
+                || command.equals("sound up")
+                || command.equals("turn volume up")
+                || command.equals("raise volume")
+                || command.equals("louder");
     }
 
     private boolean isVolumeDownCommand(String command) {
-        return command.equals("volume down") || command.equals("decrease volume") || command.equals("sound down");
+        return command.equals("volume down")
+                || command.equals("decrease volume")
+                || command.equals("sound down")
+                || command.equals("turn volume down")
+                || command.equals("lower volume")
+                || command.equals("quieter");
     }
 
     private boolean isVolumeMaxCommand(String command) {
-        return command.equals("volume max") || command.equals("max volume") || command.equals("increase to max volume");
+        return command.equals("volume max")
+                || command.equals("max volume")
+                || command.equals("maximum volume")
+                || command.equals("increase to max volume")
+                || command.equals("full volume");
     }
 
     private boolean isMuteOnCommand(String command) {
@@ -989,8 +1146,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         try {
             audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
                     increase ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
-                    0);
-            speakSystem(increase ? "Volume up" : "Volume down");
+                    AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            // Keep media/volume commands silent so TTS does not interrupt or get re-recognized.
         } catch (Exception ignored) { }
     }
 
@@ -998,8 +1155,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (audioManager == null) return;
         try {
             int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0);
-            speakSystem("Volume max");
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            // Keep media/volume commands silent so TTS does not interrupt or get re-recognized.
         } catch (Exception ignored) { }
     }
 
@@ -1013,35 +1170,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         } catch (Exception ignored) { }
         stopAfterCurrentSpeech = false;
         speechOutputActive = false;
-        abandonSpeechAudioFocus();
+        restoreManualAudioState();
         restartListening();
     }
 
     private void disableMuteMode() {
         UserPreferences.setMuted(this, false);
         speakSystem("Mute off");
-    }
-
-    private void enableBluetoothSco() {
-        if (audioManager == null) return;
-        if (Build.VERSION.SDK_INT >= 31 && !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return;
-        try {
-            if (audioManager.isBluetoothScoAvailableOffCall() && !audioManager.isBluetoothScoOn()) {
-                audioManager.startBluetoothSco();
-                audioManager.setBluetoothScoOn(true);
-            }
-        } catch (Exception ignored) { }
-    }
-
-    private void disableBluetoothSco() {
-        if (audioManager == null) return;
-        if (Build.VERSION.SDK_INT >= 31 && !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return;
-        try {
-            if (audioManager.isBluetoothScoOn()) {
-                audioManager.stopBluetoothSco();
-                audioManager.setBluetoothScoOn(false);
-            }
-        } catch (Exception ignored) { }
     }
 
     private boolean hasPermission(String permission) {
@@ -1075,7 +1210,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             stopAfterCurrentSpeech = stopAfterSpeech;
             speechOutputActive = true;
             stopListening();
-            requestDuckFocus();
+            beginManualDucking();
             Bundle params = new Bundle();
             params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
             String utteranceId = "RidingModeUtterance" + (++utteranceCounter);
@@ -1093,48 +1228,43 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
     }
 
-    private void requestDuckFocus() {
-        if (audioManager == null) return;
+    private void beginManualDucking() {
+        if (audioManager == null || mediaDuckingActive) return;
         try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build();
-                activeFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                        .setAudioAttributes(attrs)
-                        .setAcceptsDelayedFocusGain(false)
-                        .setWillPauseWhenDucked(false)
-                        .build();
-                audioManager.requestAudioFocus(activeFocusRequest);
-            } else {
-                audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+            originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+            int max = Math.max(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+            int ducked = Math.max(1, Math.min(originalMusicVolume, Math.round(max * 0.35f)));
+            if (originalMusicVolume > ducked) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, ducked, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+                mediaDuckingActive = true;
             }
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+            mediaDuckingActive = false;
+            originalMusicVolume = -1;
+        }
     }
 
-    private void abandonSpeechAudioFocus() {
-        if (audioManager == null) return;
-        try {
-            if (Build.VERSION.SDK_INT >= 26 && activeFocusRequest != null) {
-                audioManager.abandonAudioFocusRequest(activeFocusRequest);
-                activeFocusRequest = null;
-            } else {
-                audioManager.abandonAudioFocus(null);
-            }
-        } catch (Exception ignored) { }
+    private void restoreManualAudioState() {
+        restoreRecognitionSystemPrompt();
+        if (audioManager != null && mediaDuckingActive && originalMusicVolume >= 0) {
+            try {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalMusicVolume, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+            } catch (Exception ignored) { }
+        }
+        mediaDuckingActive = false;
+        originalMusicVolume = -1;
     }
 
     private void onSpeechFinished() {
         speechOutputActive = false;
-        abandonSpeechAudioFocus();
+        restoreManualAudioState();
         if (stopAfterCurrentSpeech) {
             stopAfterCurrentSpeech = false;
             shutdownRidingMode(true);
             stopSelf();
             return;
         }
-        restartListening();
+        scheduleListeningRestart(1200L);
     }
 
     private void createNotificationChannel() {
