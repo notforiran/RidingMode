@@ -120,9 +120,10 @@ public class MainActivity extends Activity {
         syncUiWithService();
         refreshContactList();
         if (RidingForegroundService.isRiding && hasCriticalPermissions()) {
-            RidingForegroundService.setActivityVoiceActive(true);
-            initActivityVoiceRecognizer();
-            scheduleActivityVoiceRestart(700L);
+            // V21: keep voice recognition centralized in the foreground service.
+            // The previous Activity-level recognizer could fail silently and leave
+            // activityVoiceActive=true, which disabled the service recognizer.
+            RidingForegroundService.setActivityVoiceActive(false);
         }
         if (pendingStartAfterNotificationSettings) {
             pendingStartAfterNotificationSettings = false;
@@ -138,7 +139,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        stopActivityVoiceRecognition();
+        // V21: do not stop the service voice loop when the Activity pauses.
         RidingForegroundService.setActivityVoiceActive(false);
     }
 
@@ -226,9 +227,8 @@ public class MainActivity extends Activity {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
             else startService(intent);
-            RidingForegroundService.setActivityVoiceActive(true);
-            initActivityVoiceRecognizer();
-            scheduleActivityVoiceRestart(1200L);
+            // V21: service recognizer is the single source of truth.
+            RidingForegroundService.setActivityVoiceActive(false);
             playEngineSound();
         } catch (Exception e) {
             setEngineOnVisuals(false);
@@ -239,7 +239,6 @@ public class MainActivity extends Activity {
     private void stopRidingMode() {
         setEngineOnVisuals(false);
         RidingForegroundService.setActivityVoiceActive(false);
-        stopActivityVoiceRecognition();
         Intent intent = new Intent(this, RidingForegroundService.class);
         intent.setAction(RidingForegroundService.ACTION_STOP);
         try {

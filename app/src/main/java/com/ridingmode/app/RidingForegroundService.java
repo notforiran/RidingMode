@@ -60,6 +60,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private boolean ttsReady;
     private Handler mainHandler;
     private Runnable restartRunnable;
+    private Runnable voiceWatchdogRunnable;
     private TelephonyManager telephonyManager;
     private PhoneStateListener phoneStateListener;
     private AudioFocusRequest activeFocusRequest;
@@ -133,14 +134,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     public static void setActivityVoiceActive(boolean active) {
-        activityVoiceActive = active;
+        // V21: Activity-level recognition is disabled. Keep this method as a
+        // compatibility hook, but never let the Activity permanently suppress
+        // the foreground service recognizer.
+        activityVoiceActive = false;
         RidingForegroundService service = activeInstance;
         if (service == null || !isRiding) return;
-        if (active) {
-            service.stopListening();
-        } else {
-            service.restartListening();
-        }
+        service.restartListening();
     }
 
     private void startForegroundMode() {
@@ -152,6 +152,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             return;
         }
         if (isRiding) {
+            startVoiceWatchdog();
             startListening();
             return;
         }
@@ -161,6 +162,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         registerPhoneListener();
         initSpeechRecognizer();
         startListening();
+        startVoiceWatchdog();
         if (!UserPreferences.isMuted(this)) speakSystem("Ride mode active");
     }
 
@@ -201,6 +203,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         speechOutputActive = false;
         clearPendingContactChoice();
         clearPendingCallRequest();
+        stopVoiceWatchdog();
         stopListening();
         unregisterPhoneListener();
         disableBluetoothSco();
@@ -265,10 +268,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
             speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US");
+            speechIntent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false);
             speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
             speechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 700L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L);
             speechIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
             speechRecognizer.setRecognitionListener(new RiderRecognitionListener(this));
             serviceListening = false;
@@ -279,6 +284,30 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             serviceListening = false;
             speakSystem("Voice recognizer failed to start");
         }
+    }
+
+
+    private void startVoiceWatchdog() {
+        if (mainHandler == null) return;
+        if (voiceWatchdogRunnable != null) mainHandler.removeCallbacks(voiceWatchdogRunnable);
+        voiceWatchdogRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isRiding || mainHandler == null) return;
+                if (!speechOutputActive && !stopAfterCurrentSpeech && !serviceListening) {
+                    startListening();
+                }
+                mainHandler.postDelayed(this, 3500L);
+            }
+        };
+        mainHandler.postDelayed(voiceWatchdogRunnable, 3500L);
+    }
+
+    private void stopVoiceWatchdog() {
+        if (mainHandler != null && voiceWatchdogRunnable != null) {
+            mainHandler.removeCallbacks(voiceWatchdogRunnable);
+        }
+        voiceWatchdogRunnable = null;
     }
 
     public void restartListening() {
@@ -293,7 +322,11 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private void startListening() {
-        if (!isRiding || activityVoiceActive || stopAfterCurrentSpeech || speechOutputActive) return;
+        // V21: the service must keep listening even while the main screen is open.
+        // Do not gate this on Activity state; that was the main reason V20
+        // could appear deaf when the Activity recognizer failed silently.
+        activityVoiceActive = false;
+        if (!isRiding || stopAfterCurrentSpeech || speechOutputActive) return;
         if (!hasPermission(Manifest.permission.RECORD_AUDIO)) return;
         if (speechRecognizer == null || speechIntent == null) initSpeechRecognizer();
         if (speechRecognizer == null || speechIntent == null || serviceListening) return;
@@ -346,6 +379,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                     return;
                 }
             }
+            // V21: use the most likely phrase as a fallback instead of dropping
+            // non-exact recognizer output.
             handleCommand(matches.get(0));
         }
         restartListening();
@@ -468,6 +503,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         command = command.replace("rider off", "ride off");
         command = command.replace("riding off", "ride off");
         command = command.replace("notification on on", "notification on");
+        command = command.replace("reed off", "ride off");
+        command = command.replace("write off", "ride off");
+        command = command.replace("night off", "ride off");
+        command = command.replace("play songs", "play song");
+        command = command.replace("next songs", "next song");
+        command = command.replace("free song", "pre song");
+        command = command.replace("pre-song", "pre song");
         return command;
     }
 
