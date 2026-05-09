@@ -228,9 +228,9 @@ public class MainActivity extends Activity {
     }
 
     private void syncUiWithService() {
-        // RidingForegroundService.isRiding is a static field and resets to false
-        // if the process is killed and restarted. Fall back to the persisted value
-        // so the UI stays in sync with the actual service state.
+        
+        
+        
         boolean riding = RidingForegroundService.isRiding || UserPreferences.wasRiding(this);
         setEngineOnVisuals(riding);
     }

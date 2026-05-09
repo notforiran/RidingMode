@@ -32,12 +32,12 @@ public final class UserPreferences {
         prefs(context).edit().putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled).apply();
     }
 
-    /** Persists ride state so that MainActivity can sync its UI after a process restart. */
+    
     public static void setRiding(Context context, boolean riding) {
         prefs(context).edit().putBoolean(KEY_IS_RIDING, riding).apply();
     }
 
-    /** Returns the last persisted ride state — useful when the static field has been reset. */
+    
     public static boolean wasRiding(Context context) {
         return prefs(context).getBoolean(KEY_IS_RIDING, false);
     }
