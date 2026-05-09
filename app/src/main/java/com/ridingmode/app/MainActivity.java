@@ -228,7 +228,11 @@ public class MainActivity extends Activity {
     }
 
     private void syncUiWithService() {
-        setEngineOnVisuals(RidingForegroundService.isRiding);
+        // RidingForegroundService.isRiding is a static field and resets to false
+        // if the process is killed and restarted. Fall back to the persisted value
+        // so the UI stays in sync with the actual service state.
+        boolean riding = RidingForegroundService.isRiding || UserPreferences.wasRiding(this);
+        setEngineOnVisuals(riding);
     }
 
     private void setEngineOnVisuals(boolean isOn) {
@@ -369,36 +373,33 @@ public class MainActivity extends Activity {
     }
 
     private String buildCommandsPreview() {
-        return "Ride off\n"
-                + "Play music\n"
-                + "Play song\n"
-                + "Pause music\n"
-                + "Next song\n"
-                + "Next track\n"
-                + "Pre song\n"
-                + "Pre music\n"
-                + "Pre track\n"
-                + "Volume up\n"
-                + "Volume down\n"
-                + "Volume max\n"
+        return "── Ride control ──\n"
+                + "Ride off\n"
+                + "\n── Music ──\n"
+                + "Play  /  Play music\n"
+                + "Pause  /  Pause music\n"
+                + "Next  /  Next song  /  Next track\n"
+                + "Previous  /  Previous song\n"
+                + "Stop music\n"
+                + "\n── Volume ──\n"
+                + "Volume up  /  Louder\n"
+                + "Volume down  /  Quieter\n"
+                + "Volume max  /  Full volume\n"
+                + "\n── Calls ──\n"
                 + "Call [name]\n"
-                + "First one\n"
-                + "Second one\n"
+                + "Answer  /  Accept\n"
+                + "End call  /  Hang up\n"
+                + "\n── Contact selection ──\n"
+                + "First  /  First one\n"
+                + "Second  /  Second one\n"
                 + "Find more\n"
                 + "Cancel\n"
-                + "Sim 1\n"
-                + "Sim 2\n"
-                + "First\n"
-                + "Second\n"
-                + "Answer\n"
-                + "Accept\n"
-                + "Finish call\n"
-                + "End call\n"
-                + "Hang up\n"
-                + "Notif off\n"
-                + "Notif on\n"
-                + "Mute on\n"
-                + "Mute off\n";
+                + "\n── SIM selection ──\n"
+                + "Sim one  /  Sim 1\n"
+                + "Sim two  /  Sim 2\n"
+                + "\n── Settings ──\n"
+                + "Notif off  /  Notif on\n"
+                + "Mute on  /  Mute off\n";
     }
 
     private int dp(int value) {

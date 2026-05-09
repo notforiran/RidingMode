@@ -15,7 +15,7 @@ android {
         applicationId 'com.ridingmode.app'
         minSdk 26
         targetSdk 35
-        versionCode 24
-        versionName '1.0.24-v24-silent-listening'
+        versionCode 29
+        versionName '1.0.29-v29-final-clean'
     }
 }

@@ -16,6 +16,7 @@ public final class UserPreferences {
     private static final String KEY_NOTIFICATIONS_ENABLED = "notifications_enabled";
     private static final String KEY_MUTED = "muted";
     private static final String KEY_CUSTOM_CONTACTS = "custom_contacts";
+    private static final String KEY_IS_RIDING = "is_riding";
 
     private UserPreferences() { }
 
@@ -29,6 +30,16 @@ public final class UserPreferences {
 
     public static void setNotificationsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled).apply();
+    }
+
+    /** Persists ride state so that MainActivity can sync its UI after a process restart. */
+    public static void setRiding(Context context, boolean riding) {
+        prefs(context).edit().putBoolean(KEY_IS_RIDING, riding).apply();
+    }
+
+    /** Returns the last persisted ride state — useful when the static field has been reset. */
+    public static boolean wasRiding(Context context) {
+        return prefs(context).getBoolean(KEY_IS_RIDING, false);
     }
 
     public static boolean isMuted(Context context) {

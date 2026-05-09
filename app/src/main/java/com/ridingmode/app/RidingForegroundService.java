@@ -27,6 +27,7 @@ import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
 import android.telephony.PhoneStateListener;
 import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyCallback;
 import android.telephony.TelephonyManager;
 import android.view.KeyEvent;
 
@@ -58,14 +59,17 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private Handler mainHandler;
     private Runnable restartRunnable;
     private Runnable voiceWatchdogRunnable;
+    private Runnable promptRestoreRunnable;   // tracks the latest system-prompt restore
     private TelephonyManager telephonyManager;
-    private PhoneStateListener phoneStateListener;
+    private PhoneStateListener phoneStateListener;         // API < 31
+    private TelephonyCallback telephonyCallback;           // API 31+ (replaces deprecated PhoneStateListener)
     private boolean mediaDuckingActive;
     private int originalMusicVolume = -1;
     private int originalSystemVolume = -1;
     private int originalNotificationVolume = -1;
     private boolean systemPromptSilenced;
     private boolean mediaWasPlayingBeforeListen;
+    private long suppressMediaAutoResumeUntilMillis;
     private boolean stopAfterCurrentSpeech;
     private boolean speechOutputActive;
     private boolean foregroundPromoted;
@@ -120,6 +124,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         Notification notification = buildNotification();
         if (!foregroundPromoted && !promoteToForegroundSafely(notification)) {
             isRiding = false;
+            UserPreferences.setRiding(this, false);
             stopSelf();
             return;
         }
@@ -129,6 +134,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             return;
         }
         isRiding = true;
+        UserPreferences.setRiding(this, true);
         recognitionErrorCount = 0;
         // Microphone ownership is centralized here: the foreground service is
         // the only component that creates and owns SpeechRecognizer.
@@ -171,6 +177,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     private void shutdownRidingMode(boolean destroySpeech) {
         isRiding = false;
+        UserPreferences.setRiding(this, false);
         foregroundPromoted = false;
         serviceListening = false;
         speechOutputActive = false;
@@ -191,38 +198,78 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private void registerPhoneListener() {
-        if (telephonyManager == null || phoneStateListener != null || !hasPermission(Manifest.permission.READ_PHONE_STATE)) return;
-        phoneStateListener = new PhoneStateListener() {
-            @Override
-            public void onCallStateChanged(int state, String phoneNumber) {
-                currentCallState = state;
-                if (!isRiding) return;
-                if (state == TelephonyManager.CALL_STATE_RINGING) {
-                    final String name = resolveContactName(phoneNumber);
-                    if (mainHandler != null) {
-                        mainHandler.postDelayed(() -> {
-                            if (currentCallState == TelephonyManager.CALL_STATE_RINGING && !UserPreferences.isMuted(RidingForegroundService.this)) {
-                                speakSystem("Incoming call from " + name);
-                            }
-                        }, 900);
-                    }
-                } else if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
-                    clearPendingContactChoice();
-                    clearPendingCallRequest();
+        if (telephonyManager == null || !hasPermission(Manifest.permission.READ_PHONE_STATE)) return;
+        if (Build.VERSION.SDK_INT >= 31) {
+            // TelephonyCallback replaces the deprecated PhoneStateListener on API 31+.
+            if (telephonyCallback != null) return;
+            telephonyCallback = new RidingCallStateCallback();
+            try {
+                telephonyManager.registerTelephonyCallback(
+                        getMainExecutor(), (TelephonyCallback) telephonyCallback);
+            } catch (Exception ignored) { }
+        } else {
+            // Legacy path for API < 31.
+            if (phoneStateListener != null) return;
+            //noinspection deprecation
+            phoneStateListener = new PhoneStateListener() {
+                @Override
+                public void onCallStateChanged(int state, String phoneNumber) {
+                    handleCallStateChange(state, phoneNumber == null ? "" : phoneNumber);
                 }
+            };
+            try {
+                //noinspection deprecation
+                telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE);
+            } catch (SecurityException ignored) { }
+        }
+    }
+
+    /** Shared call-state handler used by both the legacy and modern telephony paths. */
+    private void handleCallStateChange(int state, String phoneNumber) {
+        currentCallState = state;
+        if (!isRiding) return;
+        if (state == TelephonyManager.CALL_STATE_RINGING) {
+            // Clear any pending contact / SIM selection so an incoming call
+            // does not compete with a mid-flight "call X" flow.
+            clearPendingContactChoice();
+            clearPendingCallRequest();
+            // On API 31+, TelephonyCallback.CallStateListener does not expose
+            // the caller's number — pass whatever we received (may be empty).
+            final String name = (phoneNumber != null && phoneNumber.length() > 0)
+                    ? resolveContactName(phoneNumber)
+                    : null;
+            if (mainHandler != null) {
+                mainHandler.postDelayed(() -> {
+                    if (currentCallState == TelephonyManager.CALL_STATE_RINGING
+                            && !UserPreferences.isMuted(RidingForegroundService.this)) {
+                        speakSystem(name != null ? "Incoming call from " + name : "Incoming call");
+                    }
+                }, 900);
             }
-        };
-        try {
-            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE);
-        } catch (SecurityException ignored) { }
+        } else if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
+            clearPendingContactChoice();
+            clearPendingCallRequest();
+        }
     }
 
     private void unregisterPhoneListener() {
-        if (telephonyManager == null || phoneStateListener == null) return;
-        try {
-            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
-        } catch (Exception ignored) { }
-        phoneStateListener = null;
+        if (telephonyManager == null) return;
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (telephonyCallback != null) {
+                try {
+                    telephonyManager.unregisterTelephonyCallback((TelephonyCallback) telephonyCallback);
+                } catch (Exception ignored) { }
+                telephonyCallback = null;
+            }
+        } else {
+            if (phoneStateListener != null) {
+                try {
+                    //noinspection deprecation
+                    telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
+                } catch (Exception ignored) { }
+                phoneStateListener = null;
+            }
+        }
         currentCallState = TelephonyManager.CALL_STATE_IDLE;
     }
 
@@ -274,7 +321,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             @Override
             public void run() {
                 if (!isRiding || mainHandler == null) return;
-                if (!speechOutputActive && !stopAfterCurrentSpeech && !serviceListening) {
+                // FIX: Only kick-start listening if there is no pending restart already
+                // scheduled. Without this check, the watchdog and scheduleListeningRestart
+                // could both call startListening() within milliseconds of each other,
+                // confusing SpeechRecognizer into a busy/error state.
+                if (!speechOutputActive && !stopAfterCurrentSpeech
+                        && !serviceListening && restartRunnable == null) {
                     startListening();
                 }
                 mainHandler.postDelayed(this, 3500L);
@@ -304,6 +356,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private void startListening() {
         // Single microphone owner: never gate listening on Activity state.
         if (!isRiding || stopAfterCurrentSpeech || speechOutputActive) return;
+        // Clear the pending restart reference so the watchdog knows this slot is taken.
+        restartRunnable = null;
         long nowForListen = System.currentTimeMillis();
         if (nowForListen < suppressListeningUntilMillis) {
             scheduleListeningRestart(Math.max(250L, suppressListeningUntilMillis - nowForListen));
@@ -394,7 +448,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     private boolean looksLikeKnownCommand(String rawCommand) {
         String command = normalizeCommand(rawCommand);
         if (command.length() == 0) return false;
-        if (command.startsWith("call ")) return true;
+        if (extractCallTarget(command) != null) return true;
         return isRideOffCommand(command)
                 || isCancelCommand(command)
                 || isEndCallCommand(command)
@@ -431,10 +485,20 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     private void scheduleRecognitionSystemPromptRestore() {
         if (mainHandler == null) return;
-        mainHandler.postDelayed(this::restoreRecognitionSystemPrompt, RECOGNITION_SYSTEM_SILENCE_MS);
+        // Cancel any previously-scheduled restore so stale lambdas from the last
+        // session cannot fire mid-way through a new one and reset systemPromptSilenced
+        // to false while we are still actively silencing the recognition beep.
+        if (promptRestoreRunnable != null) mainHandler.removeCallbacks(promptRestoreRunnable);
+        promptRestoreRunnable = this::restoreRecognitionSystemPrompt;
+        mainHandler.postDelayed(promptRestoreRunnable, RECOGNITION_SYSTEM_SILENCE_MS);
     }
 
     private void restoreRecognitionSystemPrompt() {
+        // Cancel any pending scheduled restore — this call is the restore.
+        if (mainHandler != null && promptRestoreRunnable != null) {
+            mainHandler.removeCallbacks(promptRestoreRunnable);
+            promptRestoreRunnable = null;
+        }
         if (audioManager == null || !systemPromptSilenced) return;
         try {
             if (originalSystemVolume >= 0) {
@@ -471,6 +535,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (mainHandler == null) return;
         mainHandler.postDelayed(() -> {
             if (!isRiding || UserPreferences.isMuted(RidingForegroundService.this)) return;
+            if (System.currentTimeMillis() < suppressMediaAutoResumeUntilMillis) return;
             if (!mediaWasPlayingBeforeListen || isMusicPlaying()) return;
             try {
                 MediaController controller = MyNotificationListener.getActiveController();
@@ -480,7 +545,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 }
             } catch (Exception ignored) { }
             dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
-        }, 350L);
+        }, 700L);
+    }
+
+    private void suppressMediaAutoResume(long durationMs) {
+        suppressMediaAutoResumeUntilMillis = Math.max(
+                suppressMediaAutoResumeUntilMillis,
+                System.currentTimeMillis() + Math.max(0L, durationMs));
     }
 
     public void handleCommand(String rawCommand) {
@@ -488,37 +559,52 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         String command = normalizeCommand(rawCommand);
         if (command.length() == 0 || isSelfEchoCommand(command)) return;
         if (isDebouncedCommand(command)) return;
-        rememberHandledCommand(command);
+
+        // NOTE: rememberHandledCommand() is intentionally placed AFTER the
+        // OFFHOOK and RINGING guards below. Commands that are blocked by call
+        // state (e.g. "volume up" while on a call) must NOT update the debounce
+        // counter — otherwise the user can't issue that command again for 2500ms
+        // after the call ends, even though it never actually executed.
 
         if (currentCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
-            if (isEndCallCommand(command)) endCall();
+            if (isEndCallCommand(command)) {
+                rememberHandledCommand(command);
+                endCall();
+            }
+            // Any non-end-call command during an active call is silently ignored
+            // and deliberately not remembered so the debounce stays clean.
             return;
         }
 
-        if (handlePendingSimSelection(command)) return;
-        if (handlePendingContactCommand(command)) return;
+        if (handlePendingSimSelection(command)) { rememberHandledCommand(command); return; }
+        if (handlePendingContactCommand(command)) { rememberHandledCommand(command); return; }
 
         if (isMuteOnCommand(command)) {
+            rememberHandledCommand(command);
             enableMuteMode();
             return;
         }
         if (isMuteOffCommand(command)) {
+            rememberHandledCommand(command);
             disableMuteMode();
             return;
         }
 
         if (isNotificationOffCommand(command)) {
+            rememberHandledCommand(command);
             UserPreferences.setNotificationsEnabled(this, false);
             speakSystem("Notification turned off");
             return;
         }
         if (isNotificationOnCommand(command)) {
+            rememberHandledCommand(command);
             UserPreferences.setNotificationsEnabled(this, true);
             speakSystem("Notification turned on");
             return;
         }
 
         if (isCancelCommand(command)) {
+            rememberHandledCommand(command);
             clearPendingContactChoice();
             clearPendingCallRequest();
             speakSystem("Cancelled");
@@ -526,24 +612,35 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
 
         if (isRideOffCommand(command)) {
+            rememberHandledCommand(command);
             stopRidingModeWithSpeech("Ride mode off");
             return;
         }
 
         if (currentCallState == TelephonyManager.CALL_STATE_RINGING) {
-            if (command.contains("answer") || command.contains("accept")) {
+            // Use equals, not contains: "call acceptance" contains "accept" and would
+            // incorrectly trigger answerCall() instead of routing to a contact.
+            if (command.equals("answer") || command.equals("accept")) {
+                rememberHandledCommand(command);
                 answerCall();
             } else if (isEndCallCommand(command)) {
+                rememberHandledCommand(command);
                 endCall();
             }
+            // Non-call commands during ringing are intentionally not remembered.
             return;
         }
 
-        if (command.startsWith("call ")) {
-            callContact(command.substring(5).trim());
+        // From here onwards every branch executes a real action.
+        rememberHandledCommand(command);
+
+        String callTarget = extractCallTarget(command);
+        if (callTarget != null) {
+            callContact(callTarget);
         } else if (isMusicPlayCommand(command)) {
             controlMusic(KeyEvent.KEYCODE_MEDIA_PLAY, "", false);
         } else if (isMusicPauseCommand(command)) {
+            suppressMediaAutoResume(6000L);
             controlMusic(KeyEvent.KEYCODE_MEDIA_PAUSE, "", false);
         } else if (isMusicNextCommand(command)) {
             controlMusic(KeyEvent.KEYCODE_MEDIA_NEXT, "", false);
@@ -558,16 +655,56 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         }
     }
 
+    private String extractCallTarget(String command) {
+        if (command == null) return null;
+        command = command.trim();
+        if (command.length() == 0) return null;
+
+        // normalizeCommand() already converts phone/dial/ring/call-my/call-to/call-up
+        // into "call " before this method is ever called, so the only prefix that can
+        // arrive here is "call ".  The other prefixes are kept as a safety net only.
+        String[] prefixes = new String[]{
+                "call "
+        };
+        for (String prefix : prefixes) {
+            if (command.startsWith(prefix)) {
+                String target = command.substring(prefix.length()).trim();
+                target = target.replaceAll("^(my|the) ", "").trim();
+                target = normalizeFamilyVoiceAlias(target);
+                return target.length() == 0 ? null : target;
+            }
+        }
+        return null;
+    }
+
+    private String normalizeFamilyVoiceAlias(String target) {
+        if (target == null) return "";
+        String cleaned = target.trim();
+        if (cleaned.equals("mum") || cleaned.equals("mummy") || cleaned.equals("mommy")
+                || cleaned.equals("mama") || cleaned.equals("mumma") || cleaned.equals("mother")
+                || cleaned.equals("momma") || cleaned.equals("mami") || cleaned.equals("mammy")
+                || cleaned.equals("maman") || cleaned.equals("mamanam") || cleaned.equals("mamam")) {
+            return "mom";
+        }
+        if (cleaned.equals("daddy") || cleaned.equals("father") || cleaned.equals("papa")) {
+            return "dad";
+        }
+        return cleaned;
+    }
+
     private boolean isSelfEchoCommand(String command) {
+        // Only filter phrases the app actually speaks via TTS and that the
+        // microphone could pick up as a valid command.
+        //
+        // Volume commands were incorrectly listed here with a "last command" check
+        // but NO time window — meaning after saying "volume up" once, every
+        // subsequent "volume up" was permanently blocked until a different command
+        // was spoken. Removed: isDebouncedCommand() with its 2500 ms window is the
+        // correct and sufficient mechanism for echo-prevention on volume commands.
         return command.equals("ride mode active")
                 || command.equals("voice ready")
                 || command.equals("playing music")
-                || command.equals("music paused")
-                || command.equals("next track")
-                || command.equals("previous track")
-                || command.equals("volume up") && lastHandledCommand.equals("volume up")
-                || command.equals("volume down") && lastHandledCommand.equals("volume down")
-                || command.equals("volume max") && lastHandledCommand.equals("volume max");
+                || command.equals("music paused");
     }
 
     private boolean isDebouncedCommand(String command) {
@@ -629,11 +766,49 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         command = command.replace("notifications on", "notification on");
         command = command.replace("notify off", "notif off");
         command = command.replace("notify on", "notif on");
+        // --- Call verb normalization ---
+        // "cool"/"coll" removed: too aggressive — "cool music" → "call music"
+        // would trigger a spurious contact search for "music" in noisy environments.
+        command = command.replace("called ", "call ");
+        command = command.replace("calling ", "call ");
+        command = command.replace("phone ", "call ");
+        command = command.replace("dial ", "call ");
+        command = command.replace("ring ", "call ");
+        command = command.replace("call my ", "call ");
+        command = command.replace("call the ", "call ");
+        command = command.replace("call to ", "call ");
+        command = command.replace("call up ", "call ");
+        // --- Family alias normalization ---
+        // RULE: longer strings MUST precede shorter ones that are their substrings.
+        //   "maman"   IS a prefix of "mamanam" (mamanam[0:5] == "maman")
+        //   → "mamanam" must come BEFORE "maman", otherwise "mamanam" → "momam"
+        //     and the mamanam rule never fires.
+        //   "mama"    IS a prefix of "maman" → maman before mama (done below)
+        //   "mum"     IS a prefix of "mummy","mumma" → those first, then "mum"
+        //   "mamm"    IS a prefix of "mammy" → mammy before mama (no shared prefix with maman)
+        command = command.replace("mamanam", "mom");  // 7 chars — MUST be first
+        command = command.replace("maman",   "mom");  // 5 chars — after mamanam
+        command = command.replace("mamam",   "mom");  // 5 chars — no overlap with maman
+        command = command.replace("mommy",   "mom");  // 5 chars
+        command = command.replace("mummy",   "mom");  // 5 chars — before "mum" (3 chars)
+        command = command.replace("mumma",   "mom");  // 5 chars — before "mum"
+        command = command.replace("momma",   "mom");  // 5 chars
+        command = command.replace("mammy",   "mom");  // 5 chars — before "mama" (4 chars)
+        command = command.replace("mama",    "mom");  // 4 chars — after maman/mamam/mamanam
+        command = command.replace("mami",    "mom");  // 4 chars
+        command = command.replace("mother",  "mom");  // 6 chars — no overlap risk
+        command = command.replace("mum",     "mom");  // 3 chars — last, after mummy/mumma
+        command = command.replace("daddy",   "dad");
+        command = command.replace("father",  "dad");
+        command = command.replace("papa",    "dad");
         command = command.replaceAll("\\b(please|hey|ok|okay|now)\\b", " ").replaceAll("\\s+", " ").trim();
         return command;
     }
 
     private boolean isRideOffCommand(String command) {
+        // "bike off" is not listed here — normalizeCommand converts it to "ride off"
+        // before this method is ever called, so the equals("bike off") check was
+        // dead code.
         return command.equals("ride off")
                 || command.contains(" ride off")
                 || command.contains("ride off ")
@@ -646,8 +821,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 || command.equals("turn off engine")
                 || command.equals("shutdown riding mode")
                 || command.equals("shut down riding mode")
-                || command.equals("shut off ride mode")
-                || command.equals("bike off");
+                || command.equals("shut off ride mode");
     }
 
     private boolean isCancelCommand(String command) {
@@ -664,13 +838,13 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private boolean isMusicPlayCommand(String command) {
-        return command.equals("play music")
+        // "resume music/song" and "start music/song" are converted to
+        // "play music/song" by normalizeCommand before this is called, so only
+        // the "play …" variants are reachable here.
+        return command.equals("play")
+                || command.equals("play music")
                 || command.equals("play song")
-                || command.equals("play track")
-                || command.equals("resume music")
-                || command.equals("resume song")
-                || command.equals("start music")
-                || command.equals("start song");
+                || command.equals("play track");
     }
 
     private boolean isMusicPauseCommand(String command) {
@@ -682,23 +856,22 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
     }
 
     private boolean isMusicNextCommand(String command) {
+        // "next music" is converted to "next song" by normalizeCommand.
         return command.equals("next")
                 || command.equals("next song")
-                || command.equals("next track")
-                || command.equals("next music");
+                || command.equals("next track");
     }
 
     private boolean isMusicPreviousCommand(String command) {
+        // "prev song/music/track" are converted to "pre …" by normalizeCommand,
+        // so only the "pre …" and "previous …" forms arrive here.
         return command.equals("previous")
                 || command.equals("previous song")
                 || command.equals("previous track")
                 || command.equals("previous music")
                 || command.equals("pre song")
                 || command.equals("pre music")
-                || command.equals("pre track")
-                || command.equals("prev song")
-                || command.equals("prev music")
-                || command.equals("prev track");
+                || command.equals("pre track");
     }
 
     private boolean isVolumeUpCommand(String command) {
@@ -776,9 +949,10 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             return true;
         }
 
-        if (command.startsWith("call ")) {
+        String repeatedCallTarget = extractCallTarget(command);
+        if (repeatedCallTarget != null) {
             clearPendingContactChoice();
-            callContact(command.substring(5).trim());
+            callContact(repeatedCallTarget);
             return true;
         }
         return false;
@@ -802,7 +976,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
         PendingCallRequest request = pendingCallRequest;
         clearPendingCallRequest();
-        placeCall(request.number, request.displayName, request.phoneAccounts.get(simIndex), simIndex);
+        // pendingCallRequest is only ever set when there are 2+ SIMs, so multiSim=true.
+        placeCall(request.number, request.displayName, request.phoneAccounts.get(simIndex), simIndex, true);
         return true;
     }
 
@@ -820,7 +995,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     private void callContact(String nameOrNumber) {
         if (nameOrNumber == null || nameOrNumber.trim().length() == 0) return;
-        String query = nameOrNumber.trim();
+        String query = normalizeFamilyVoiceAlias(nameOrNumber.trim());
         if (!hasPermission(Manifest.permission.CALL_PHONE)) {
             speakSystem("Call permission missing");
             return;
@@ -896,13 +1071,14 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     private void routeCall(String number, String displayName) {
         List<PhoneAccountHandle> phoneAccounts = getCallCapablePhoneAccounts();
-        if (phoneAccounts.size() > 1) {
+        boolean multiSim = phoneAccounts.size() > 1;
+        if (multiSim) {
             pendingCallRequest = new PendingCallRequest(displayName, number, phoneAccounts);
             String target = displayName == null || displayName.trim().length() == 0 ? "this number" : displayName;
             speakSystem("I am ready to call " + target + ". Say sim one or sim two.");
             return;
         }
-        placeCall(number, displayName, phoneAccounts.isEmpty() ? null : phoneAccounts.get(0), 0);
+        placeCall(number, displayName, phoneAccounts.isEmpty() ? null : phoneAccounts.get(0), 0, false);
     }
 
     private void clearPendingCallRequest() {
@@ -974,7 +1150,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
 
     private int scoreContactName(String displayName, String normalizedQuery) {
         String normalizedName = normalizeForMatch(displayName);
-        if (normalizedName.length() == 0) return 0;
+        String normalizedRawName = normalizeRawNameForFamilyAliases(displayName);
+        if (normalizedName.length() == 0 && normalizedRawName.length() == 0) return 0;
+
+        if (isMomQuery(normalizedQuery) && looksLikeMomName(normalizedName, normalizedRawName)) return 1120;
+        if (isDadQuery(normalizedQuery) && looksLikeDadName(normalizedName, normalizedRawName)) return 1110;
+
         if (normalizedName.equals(normalizedQuery)) return 1000;
         String[] tokens = normalizedName.split(" ");
         for (String token : tokens) {
@@ -989,6 +1170,59 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         return 0;
     }
 
+    private boolean isMomQuery(String normalizedQuery) {
+        return normalizedQuery.equals("mom") || normalizedQuery.equals("mum") || normalizedQuery.equals("mother")
+                || normalizedQuery.equals("mama") || normalizedQuery.equals("mami") || normalizedQuery.equals("maman")
+                || normalizedQuery.equals("mamanam") || normalizedQuery.equals("mamam");
+    }
+
+    private boolean isDadQuery(String normalizedQuery) {
+        return normalizedQuery.equals("dad") || normalizedQuery.equals("father") || normalizedQuery.equals("papa");
+    }
+
+    private boolean looksLikeMomName(String normalizedName, String normalizedRawName) {
+        return containsWholeToken(normalizedName, "mom")
+                || containsWholeToken(normalizedName, "mum")
+                || containsWholeToken(normalizedName, "mother")
+                || containsWholeToken(normalizedName, "mama")
+                || containsWholeToken(normalizedName, "mami")
+                || normalizedRawName.contains("مامان")
+                || normalizedRawName.contains("مادر")
+                || normalizedRawName.contains("مامی")
+                || normalizedRawName.contains("مامانم")
+                || normalizedRawName.contains("mom")
+                || normalizedRawName.contains("mum")
+                || normalizedRawName.contains("mother")
+                || normalizedRawName.contains("maman")
+                || normalizedRawName.contains("mami");
+    }
+
+    private boolean looksLikeDadName(String normalizedName, String normalizedRawName) {
+        return containsWholeToken(normalizedName, "dad")
+                || containsWholeToken(normalizedName, "father")
+                || containsWholeToken(normalizedName, "papa")
+                || normalizedRawName.contains("بابا")
+                || normalizedRawName.contains("پدر")
+                || normalizedRawName.contains("dad")
+                || normalizedRawName.contains("father");
+    }
+
+    private boolean containsWholeToken(String normalizedName, String token) {
+        if (normalizedName == null || normalizedName.length() == 0) return false;
+        if (normalizedName.equals(token)) return true;
+        return normalizedName.startsWith(token + " ")
+                || normalizedName.endsWith(" " + token)
+                || normalizedName.contains(" " + token + " ");
+    }
+
+    private String normalizeRawNameForFamilyAliases(String value) {
+        if (value == null) return "";
+        return Normalizer.normalize(value, Normalizer.Form.NFC)
+                .toLowerCase(Locale.US)
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     private String normalizeForMatch(String value) {
         if (value == null) return "";
         return Normalizer.normalize(value, Normalizer.Form.NFD)
@@ -999,7 +1233,7 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 .trim();
     }
 
-    private void placeCall(String number, String displayName, PhoneAccountHandle phoneAccountHandle, int simIndex) {
+    private void placeCall(String number, String displayName, PhoneAccountHandle phoneAccountHandle, int simIndex, boolean multiSim) {
         if (number == null || number.trim().length() == 0) {
             speakSystem("Contact not found");
             return;
@@ -1013,7 +1247,8 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             }
             startActivity(intent);
             String label = displayName == null || displayName.trim().length() == 0 ? "number" : displayName;
-            if (phoneAccountHandle != null && getCallCapablePhoneAccounts().size() > 1) {
+            // Use the caller-supplied flag instead of querying phone accounts again.
+            if (multiSim) {
                 speakSystem("Calling " + label + " on sim " + (simIndex + 1));
             } else {
                 speakSystem("Calling " + label);
@@ -1032,13 +1267,6 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
                 if (accounts != null) result.addAll(accounts);
             }
         } catch (Exception ignored) { }
-        if (result.isEmpty() && Build.VERSION.SDK_INT >= 22) {
-            try {
-                SubscriptionManager subscriptionManager = getSystemService(SubscriptionManager.class);
-                if (subscriptionManager != null && hasPermission(Manifest.permission.READ_PHONE_STATE) && subscriptionManager.getActiveSubscriptionInfoList() != null) {
-                }
-            } catch (Exception ignored) { }
-        }
         return result;
     }
 
@@ -1073,19 +1301,25 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speakSystem("Answer call permission missing");
             return;
         }
-        boolean attempted = false;
+        boolean telecomSucceeded = false;
         try {
             TelecomManager tm = (TelecomManager) getSystemService(TELECOM_SERVICE);
             if (tm != null) {
                 tm.acceptRingingCall();
-                attempted = true;
+                telecomSucceeded = true;
             }
         } catch (Exception ignored) { }
-        try {
-            dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
-            attempted = true;
-        } catch (Exception ignored) { }
-        speakSystem(attempted ? "Answering" : "Answer failed");
+
+        // Only fall back to HEADSETHOOK if TelecomManager didn't work.
+        // Sending HEADSETHOOK after a call is already answered can accidentally
+        // toggle the call state and end the session on many devices.
+        if (!telecomSucceeded) {
+            try {
+                dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
+                telecomSucceeded = true;
+            } catch (Exception ignored) { }
+        }
+        speakSystem(telecomSucceeded ? "Answering" : "Answer failed");
     }
 
     private void endCall() {
@@ -1097,19 +1331,25 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             speakSystem("Call control permission missing");
             return;
         }
-        boolean attempted = false;
+        boolean telecomSucceeded = false;
         try {
             TelecomManager tm = (TelecomManager) getSystemService(TELECOM_SERVICE);
             if (tm != null) {
                 tm.endCall();
-                attempted = true;
+                telecomSucceeded = true;
             }
         } catch (Exception ignored) { }
-        try {
-            dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
-            attempted = true;
-        } catch (Exception ignored) { }
-        speakSystem(attempted ? "Ending call" : "End call failed");
+
+        // Only fall back to HEADSETHOOK if TelecomManager didn't work.
+        // On some phones, HEADSETHOOK after a call ends will re-dial the last
+        // number or activate the voice assistant — avoid that.
+        if (!telecomSucceeded) {
+            try {
+                dispatchMediaKey(KeyEvent.KEYCODE_HEADSETHOOK);
+                telecomSucceeded = true;
+            } catch (Exception ignored) { }
+        }
+        speakSystem(telecomSucceeded ? "Ending call" : "End call failed");
     }
 
     private void controlMusic(int keyCode, String confirmation, boolean speakConfirmation) {
@@ -1126,11 +1366,18 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         } catch (Exception ignored) {
             handledByController = false;
         }
-        if (!handledByController) dispatchMediaKey(keyCode);
+
+        // Some players expose a media session but ignore TransportControls.pause().
+        // For PAUSE specifically, also send the dedicated PAUSE media key. This is not a toggle,
+        // so it will not accidentally resume playback the way HEADSETHOOK / PLAY_PAUSE can.
+        if (!handledByController || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
+            dispatchMediaKey(keyCode);
+        }
         if (speakConfirmation) speakSystem(confirmation);
     }
 
     private void pauseMusicSilently() {
+        suppressMediaAutoResume(6000L);
         controlMusic(KeyEvent.KEYCODE_MEDIA_PAUSE, "", false);
     }
 
@@ -1165,17 +1412,27 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         clearPendingContactChoice();
         clearPendingCallRequest();
         pauseMusicSilently();
+        // Set flags BEFORE stopping TTS. Some engines fire onError() synchronously
+        // (or via a handler post) when stop() is called, which would trigger
+        // onSpeechFinished() → scheduleListeningRestart() — an extra no-op restart
+        // that adds timing noise. With speechOutputActive already false here, the
+        // onSpeechFinished guard (if speechOutputActive &&...) returns cleanly.
+        stopAfterCurrentSpeech = false;
+        speechOutputActive = false;
         try {
             if (tts != null) tts.stop();
         } catch (Exception ignored) { }
-        stopAfterCurrentSpeech = false;
-        speechOutputActive = false;
         restoreManualAudioState();
         restartListening();
     }
 
     private void disableMuteMode() {
         UserPreferences.setMuted(this, false);
+        // Clear the auto-resume suppression that was set when muting paused the
+        // music. Without this, the restoreMediaPlaybackIfRecognitionPausedIt
+        // runnable would still see the old suppress window and refuse to resume
+        // music for up to 6 seconds after the user unmutes.
+        suppressMediaAutoResumeUntilMillis = 0L;
         speakSystem("Mute off");
     }
 
@@ -1213,14 +1470,21 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             beginManualDucking();
             Bundle params = new Bundle();
             params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
-            String utteranceId = "RidingModeUtterance" + (++utteranceCounter);
+            final String utteranceId = "RidingModeUtterance" + (++utteranceCounter);
             int result = tts.speak(text, flush ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, params, utteranceId);
             if (result == TextToSpeech.ERROR) {
                 onSpeechFinished();
             } else if (mainHandler != null) {
+                // Watchdog fires only if TTS never called onDone/onError (e.g. engine crash).
+                // We track the utteranceId so the watchdog can bail out if a newer
+                // utterance has already taken over and reset speechOutputActive.
+                final long watchdogCounter = utteranceCounter;
                 long watchdogMs = Math.max(1800L, Math.min(7000L, text.length() * 75L + 1200L));
                 mainHandler.postDelayed(() -> {
-                    if (speechOutputActive) onSpeechFinished();
+                    // Only fire if we are still waiting for THIS utterance.
+                    if (speechOutputActive && utteranceCounter == watchdogCounter) {
+                        onSpeechFinished();
+                    }
                 }, watchdogMs);
             }
         } catch (Exception ignored) {
@@ -1232,8 +1496,12 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
         if (audioManager == null || mediaDuckingActive) return;
         try {
             originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-            int max = Math.max(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
-            int ducked = Math.max(1, Math.min(originalMusicVolume, Math.round(max * 0.35f)));
+            // FIX: duck relative to the *current* volume, not the stream maximum.
+            // Old formula (max * 0.35) would actually RAISE the volume when the
+            // user was listening quietly (e.g. vol=2 on a 15-step scale gives
+            // max*0.35 ≈ 5 > 2 — the opposite of ducking). Now we reduce to 40%
+            // of whatever the user already has set.
+            int ducked = Math.max(1, Math.round(originalMusicVolume * 0.40f));
             if (originalMusicVolume > ducked) {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, ducked, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
                 mediaDuckingActive = true;
@@ -1387,6 +1655,19 @@ public class RidingForegroundService extends Service implements TextToSpeech.OnI
             this.displayName = displayName;
             this.number = number;
             this.phoneAccounts = new ArrayList<>(phoneAccounts);
+        }
+    }
+
+    /**
+     * Named inner class required because Java anonymous classes cannot have an
+     * {@code implements} clause.  This class is only instantiated on API >= 31.
+     */
+    @android.annotation.RequiresApi(api = Build.VERSION_CODES.S)
+    private class RidingCallStateCallback extends TelephonyCallback
+            implements TelephonyCallback.CallStateListener {
+        @Override
+        public void onCallStateChanged(int state) {
+            handleCallStateChange(state, "");
         }
     }
 }
